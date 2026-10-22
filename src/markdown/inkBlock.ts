@@ -9,7 +9,9 @@ import {
 	ToolState,
 	type Annotation,
 } from '../annotate';
+import type { ContentZoom } from '../annotate/pointer';
 import { createId } from '../annotate/id';
+import { MAX_CANVAS_PIXELS } from '../pdf/renderScale';
 import { INK_BLOCK_LANGUAGE, InkBlockData, emptyInkBlock } from './inkBlockFormat';
 import { InNoteStorage } from './inNoteStorage';
 import type { BlockRefusal, InkBlockStorage, StorageHost, StorageWriteResult } from './inkBlockStorage';
@@ -31,7 +33,8 @@ const WRITE_DEBOUNCE_MS = 800;
 // from under the stroke in progress.
 const GESTURE_RETRY_MS = 250;
 
-// Undo histories kept across the re-render a block’s own save causes.
+// Undo histories, and pinch-zoom, kept across the re-render a block’s own
+// save causes.
 //
 // A block’s controller is destroyed and rebuilt roughly a second after
 // the pen comes up, and the history used to go with it — so undo could
@@ -39,14 +42,19 @@ const GESTURE_RETRY_MS = 250;
 // most. Keeping it out here, and handing it back to the rebuilt
 // controller, is the same move ToolState made for the pen itself.
 //
-// Keyed by note path, block id, and the scale the entries were recorded
-// at: an entry holds coordinates, so replaying one recorded at a
-// different surface resolution would put the ink back in the wrong place.
-// A window resized mid-session starts a fresh history rather than a
-// subtly wrong one.
+// Keyed by note path and block id, and holding the scale the entries were
+// recorded at: an entry holds coordinates, so a block rebuilt at a
+// different surface resolution — a resized window, a zoom — carries every
+// entry across to its own (see InkBlockView.rescaleHistory).
+//
+// The zoom is kept for the same reason the history is. It lived on the
+// block's zoomable element, which every save throws away, so a block you
+// had zoomed into to write small sprang back to its full view a second
+// after each pause.
 interface RetainedHistory {
 	history: HistoryStack;
 	scale: number;
+	zoom: ContentZoom | null;
 }
 
 const retainedHistories = new Map<string, RetainedHistory>();
@@ -61,7 +69,7 @@ function retainedHistoryFor(key: string): RetainedHistory {
 	const existing = retainedHistories.get(key);
 	if (existing) return existing;
 
-	const retained: RetainedHistory = { history: new HistoryStack(), scale: 1 };
+	const retained: RetainedHistory = { history: new HistoryStack(), scale: 1, zoom: null };
 	retainedHistories.set(key, retained);
 	while (retainedHistories.size > MAX_RETAINED_HISTORIES) {
 		const oldest = retainedHistories.keys().next().value;
@@ -224,6 +232,23 @@ function surfaceScale(containerEl: HTMLElement, storedWidth: number): number {
 	return Math.min(Math.max((cssWidth * density) / storedWidth, 1), MAX_SURFACE_SCALE);
 }
 
+// How densely a block is backed while zoomed: as many canvas pixels per
+// screen pixel as at its unzoomed size, so ink zoomed into stays as sharp
+// as ink seen whole — within what one canvas may hold (MAX_CANVAS_PIXELS,
+// the limit a phone or tablet browser puts on it), and never less than the
+// unzoomed backing.
+function zoomedScale(base: number, zoom: number, storedWidth: number, storedHeight: number): number {
+	const budget = storedWidth > 0 && storedHeight > 0 ? Math.sqrt(MAX_CANVAS_PIXELS / (storedWidth * storedHeight)) : base;
+	return Math.max(base, Math.min(base * zoom, budget));
+}
+
+// Re-backing a block costs a redraw of everything on it, so a zoom that
+// barely changes how sharp it needs to be does not trigger one. Downwards
+// only once it is far denser than needed, which frees the memory a deep
+// zoom took.
+const REBACK_UP = 1.15;
+const REBACK_DOWN = 1.5;
+
 // Only the block’s own single drawing surface is ever mounted into a given
 // controller, so the page-keyed API the controller shares with the PDF view
 // (where the key is a real page number) always gets the same key here.
@@ -304,6 +329,10 @@ class InkBlockView implements StorageHost {
 	// controller holds is in surface units, everything in the file is in
 	// stored units, and this is the only thing between them.
 	private scale = 1;
+	// What the surface would be backed at unzoomed: the block's own column
+	// width times the screen's density (see surfaceScale). `scale` is this,
+	// raised while the block is zoomed.
+	private baseScale = 1;
 	private readonly retained: RetainedHistory;
 	// The element the canvases are mounted into, and whether they
 	// currently are. See watchVisibility.
@@ -338,6 +367,7 @@ class InkBlockView implements StorageHost {
 		private readonly storage: InkBlockStorage,
 		toolState: ToolState,
 		private readonly captionsEnabled: () => boolean,
+		penButton?: () => 'eraser' | 'highlighter' | 'select' | 'none',
 	) {
 		this.blockId = storage.blockId;
 		// Until the storage shows something. Its size is what the block holds
@@ -357,6 +387,13 @@ class InkBlockView implements StorageHost {
 			history: this.retained.history,
 			getCurrentPage: () => BLOCK_PAGE,
 			onAnnotationsChanged: () => this.scheduleWrite(),
+			// Backed denser while zoomed (see zoomedScale), and a pen is
+			// measured against the block as it is shown, not against how
+			// many pixels happen to be behind it — so the same pen makes the
+			// same line zoomed in or out.
+			getInkScale: () => this.scale / this.baseScale,
+			onZoomSettled: () => this.onZoomSettled(),
+			getPenButtonAction: penButton,
 		});
 		// No pages to add or remove inside a note — that's a handwritten-note
 		// concept, and the toolbar hides the control when this is false.
@@ -523,7 +560,20 @@ class InkBlockView implements StorageHost {
 		// A surface not laid out yet measures zero wide, and surfaceScale reads
 		// that as 1 — a soft canvas. The scale it mounted at stays until it
 		// can be measured.
-		const scale = this.surfaceEl.clientWidth ? surfaceScale(this.surfaceEl, this.data.width) : this.scale;
+		const scale = this.surfaceEl.clientWidth ? this.targetScale() : this.scale;
+		this.rebackSurface(scale);
+	}
+
+	// The scale the surface should be backed at now, for its width and its
+	// zoom.
+	private targetScale(): number {
+		if (this.surfaceEl.clientWidth) this.baseScale = surfaceScale(this.surfaceEl, this.data.width);
+		return zoomedScale(this.baseScale, this.retained.zoom?.scale ?? 1, this.data.width, this.data.height);
+	}
+
+	// Re-backs the mounted surface at `scale`, carrying the ink on it and
+	// every undo entry across in proportion.
+	private rebackSurface(scale: number): void {
 		const width = this.data.width * scale;
 		const height = this.data.height * scale;
 		if (this.mountedSize?.width === width && this.mountedSize.height === height) return;
@@ -536,10 +586,37 @@ class InkBlockView implements StorageHost {
 			height,
 			factor === 1 ? annotations : annotations.map((a) => scaleAnnotationUniform(a, factor)),
 		);
-		if (factor !== 1) this.retained.history.clear();
 		this.scale = scale;
-		this.retained.scale = scale;
+		this.rescaleHistory();
 		this.mountedSize = { width, height };
+	}
+
+	// Brings the retained undo history into the surface's current scale.
+	// Entries hold coordinates; one recorded at another scale and replayed
+	// as it is would put the ink back in the wrong place, which is why this
+	// used to clear the history instead — and why resizing a window, or now
+	// zooming, used to cost every undo.
+	private rescaleHistory(): void {
+		const from = this.retained.scale;
+		this.retained.scale = this.scale;
+		if (!(from > 0) || Math.abs(from - this.scale) < 0.001) return;
+		const factor = this.scale / from;
+		const history = this.retained.history;
+		history.restore(history.snapshot(), (entry) => ({
+			...entry,
+			before: entry.before.map((a) => scaleAnnotationUniform(a, factor)),
+			after: entry.after.map((a) => scaleAnnotationUniform(a, factor)),
+		}));
+	}
+
+	// A pinch, a Ctrl+wheel or the toolbar has settled on a zoom: kept for
+	// the block's next rebuild, and the surface backed for it.
+	private onZoomSettled(): void {
+		const zoom = this.controller.getPageZoomState(BLOCK_PAGE);
+		if (!zoom || !this.mounted) return;
+		this.retained.zoom = zoom.scale === 1 && zoom.x === 0 && zoom.y === 0 ? null : zoom;
+		const target = this.targetScale();
+		if (target > this.scale * REBACK_UP || target < this.scale / REBACK_DOWN) this.rebackSurface(target);
 	}
 
 	private seed(): void {
@@ -666,7 +743,7 @@ class InkBlockView implements StorageHost {
 				// Built on demand, not for every block on screen: a note can
 				// hold many of these, and a full tool strip apiece would crowd
 				// out the writing they're meant to sit alongside.
-				this.disposeToolbar = buildToolbar(this.toolbarHost, this.controller);
+				this.disposeToolbar = buildToolbar(this.toolbarHost, this.controller, { app: this.plugin.app });
 			} else {
 				this.disposeToolbar?.();
 				this.disposeToolbar = null;
@@ -911,12 +988,14 @@ class InkBlockView implements StorageHost {
 		// zero and every canvas came out backed at the stored size — which
 		// is exactly the softness this was meant to fix.
 		const previous = this.scale;
-		this.scale = surfaceScale(this.surfaceEl, this.data.width);
+		this.scale = this.targetScale();
 		const width = this.data.width * this.scale;
 		const height = this.data.height * this.scale;
 
 		this.controller.mountPage(BLOCK_PAGE, this.contentEl, width, height);
 		this.mountedSize = { width, height };
+		// Zoomed where it was before the save that rebuilt it.
+		if (this.retained.zoom) this.controller.restorePageZoom(BLOCK_PAGE, this.retained.zoom);
 
 		if (!this.seeded) {
 			// Only ever on the first mount, and only once the storage has shown
@@ -936,12 +1015,8 @@ class InkBlockView implements StorageHost {
 				height,
 				this.controller.getPageAnnotations(BLOCK_PAGE).map((a) => scaleAnnotationUniform(a, factor)),
 			);
-			// History entries hold coordinates in the scale they were
-			// recorded at, so replaying one now would put ink back in the
-			// wrong place. Losing undo is the lesser of the two.
-			this.retained.history.clear();
 		}
-		this.retained.scale = this.scale;
+		this.rescaleHistory();
 		markRecentlyMounted(recoveryKey(this.ctx.sourcePath, this.blockId));
 	}
 
@@ -1106,6 +1181,8 @@ class InkBlockChild extends MarkdownRenderChild {
 
 export interface InkBlockOptions {
 	captionsEnabled: () => boolean;
+	/** What holding a stylus's side button does (see the setting). */
+	penButton?: () => 'eraser' | 'highlighter' | 'select' | 'none';
 	/** Where a new block's ink file goes, for a note at this path. */
 	inkFilePathFor: (notePath: string) => Promise<string>;
 }
@@ -1189,7 +1266,7 @@ export function registerInkBlock(plugin: Plugin, toolState: ToolState, options: 
 				const storage = isInkFileFence(source)
 					? new InkFileStorage(stores, parseInkFence(source))
 					: new InNoteStorage(plugin, ctx, el, source);
-				return new InkBlockView(plugin, ctx, el, storage, toolState, options.captionsEnabled);
+				return new InkBlockView(plugin, ctx, el, storage, toolState, options.captionsEnabled, options.penButton);
 			}),
 		);
 	});

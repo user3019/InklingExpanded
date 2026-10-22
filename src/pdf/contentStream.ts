@@ -25,10 +25,26 @@ export function moveLineOps(points: Point[]): string {
 // because PDF has no quadratic operator of its own.
 export function pathOps(segments: PathSegment[]): string {
 	const parts: string[] = [];
+	let at: Point | null = null;
 	for (const segment of segments) {
 		if (segment.kind === 'move') parts.push(`${n(segment.to.x)} ${n(segment.to.y)} m`);
 		else if (segment.kind === 'line') parts.push(`${n(segment.to.x)} ${n(segment.to.y)} l`);
-		else parts.push(`${n(segment.control.x)} ${n(segment.control.y)} ${n(segment.to.x)} ${n(segment.to.y)} v`);
+		else if (at) {
+			// PDF has no quadratic curve, so each becomes the cubic that
+			// traces exactly the same curve: both control points two thirds of
+			// the way from an end to the quadratic's control. The canvas draws
+			// the quadratic itself, and this is what keeps the two identical —
+			// the `v` shorthand this used to emit is a different, flatter
+			// curve, which put a faint corner at every sample in the saved
+			// file that the screen never showed.
+			const { control, to } = segment;
+			const c1 = { x: at.x + (2 / 3) * (control.x - at.x), y: at.y + (2 / 3) * (control.y - at.y) };
+			const c2 = { x: to.x + (2 / 3) * (control.x - to.x), y: to.y + (2 / 3) * (control.y - to.y) };
+			parts.push(`${n(c1.x)} ${n(c1.y)} ${n(c2.x)} ${n(c2.y)} ${n(to.x)} ${n(to.y)} c`);
+		} else {
+			parts.push(`${n(segment.control.x)} ${n(segment.control.y)} ${n(segment.to.x)} ${n(segment.to.y)} v`);
+		}
+		at = segment.to;
 	}
 	return parts.join('\n');
 }

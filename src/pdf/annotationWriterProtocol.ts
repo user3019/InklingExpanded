@@ -57,6 +57,8 @@ interface OpenedOk {
 	// Whether this file can be appended to rather than rewritten, which is
 	// what the view's save cadence turns on.
 	incremental: boolean;
+	// See pageIdsOf in annotationWriterCore.ts.
+	pageIds: string[];
 }
 
 // Discriminated, because the two outcomes go to different Vault calls and

@@ -1,5 +1,13 @@
 import { describe, expect, it } from 'vitest';
-import { MAX_RENDER_SCALE, RENDER_SCALE, baseRenderScale, layoutRenderScale, zoomedRenderScale } from '../../src/pdf/renderScale';
+import {
+	MAX_CANVAS_PIXELS,
+	MAX_RENDER_SCALE,
+	RENDER_SCALE,
+	baseRenderScale,
+	capToPixelBudget,
+	layoutRenderScale,
+	zoomedRenderScale,
+} from '../../src/pdf/renderScale';
 
 // The numbers here are the ones measured in the running app on 2026-09-07,
 // comparing Obsidian's core `pdf` view against the annotate view on the same
@@ -77,5 +85,17 @@ describe('zoomedRenderScale', () => {
 
 	it('never exceeds the memory ceiling', () => {
 		expect(zoomedRenderScale(3, 4)).toBe(MAX_RENDER_SCALE);
+	});
+});
+
+describe('capToPixelBudget', () => {
+	it('leaves an ordinary page alone', () => {
+		expect(capToPixelBudget(2, 612, 792)).toBe(2);
+	});
+
+	it('keeps a large page inside what one canvas may hold', () => {
+		const scale = capToPixelBudget(4, 3000, 3000);
+		expect(3000 * scale * 3000 * scale).toBeLessThanOrEqual(MAX_CANVAS_PIXELS + 1);
+		expect(scale).toBeLessThan(4);
 	});
 });

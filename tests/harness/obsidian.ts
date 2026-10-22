@@ -121,12 +121,95 @@ export class Plugin extends Component {}
 export const openedModals: Modal[] = [];
 
 export class Modal {
+	// The dialog's own elements, as Obsidian gives a modal them — detached,
+	// and only built when something asks, so a test that never opens a
+	// dialog's contents needs no DOM at all.
+	private elements: { modalEl: HTMLElement; contentEl: HTMLElement } | null = null;
 	constructor(public app: unknown) {}
+	get modalEl(): HTMLElement {
+		return this.dom().modalEl;
+	}
+	get contentEl(): HTMLElement {
+		return this.dom().contentEl;
+	}
+	private dom(): { modalEl: HTMLElement; contentEl: HTMLElement } {
+		if (!this.elements) {
+			const modalEl = document.createElement('div');
+			modalEl.className = 'modal';
+			const contentEl = modalEl.appendChild(document.createElement('div'));
+			contentEl.className = 'modal-content';
+			this.elements = { modalEl, contentEl };
+		}
+		return this.elements;
+	}
+	setTitle(title: string): this {
+		this.modalEl.setAttribute('data-title', title);
+		return this;
+	}
 	open(): void {
 		openedModals.push(this);
 	}
 	close(): void {
 		// Nothing to close in a test.
+	}
+}
+
+// Obsidian's quick-switcher dialog, as far as the import flow reaches into
+// it: opening is recorded, like any modal, and nothing is ever chosen.
+export class FuzzySuggestModal<T> extends Modal {
+	placeholder = '';
+	setPlaceholder(placeholder: string): void {
+		this.placeholder = placeholder;
+	}
+	getItems(): T[] {
+		return [];
+	}
+}
+
+// A context menu: its items, recorded so a test can read and press them.
+export interface MenuItemRecord {
+	title: string;
+	icon: string;
+	click: () => void;
+	label?: boolean;
+}
+export const shownMenus: MenuItemRecord[][] = [];
+
+export class Menu {
+	private readonly items: MenuItemRecord[] = [];
+	addItem(
+		build: (item: {
+			setTitle(t: string): unknown;
+			setIcon(i: string): unknown;
+			setWarning(w: boolean): unknown;
+			setIsLabel(l: boolean): unknown;
+			setChecked(c: boolean | null): unknown;
+			setDisabled(d: boolean): unknown;
+			onClick(f: () => void): unknown;
+		}) => unknown,
+	): this {
+		const record: MenuItemRecord = { title: '', icon: '', click: () => undefined };
+		const item = {
+			setTitle: (title: string) => ((record.title = title), item),
+			setIcon: (icon: string) => ((record.icon = icon), item),
+			setWarning: () => item,
+			setIsLabel: (label: boolean) => ((record.label = label), item),
+			setChecked: () => item,
+			setDisabled: () => item,
+			onClick: (click: () => void) => ((record.click = click), item),
+		};
+		build(item);
+		this.items.push(record);
+		return this;
+	}
+	addSeparator(): this {
+		return this;
+	}
+	showAtPosition(): void {
+		shownMenus.push(this.items);
+	}
+	showAtMouseEvent(): void {
+		shownMenus.push(this.items);
 	}
 }
 
@@ -244,5 +327,6 @@ export function normalizePath(path: string): string {
 export function resetObsidianStubs(): void {
 	notices.length = 0;
 	openedModals.length = 0;
+	shownMenus.length = 0;
 	iconRequests.length = 0;
 }

@@ -1,4 +1,4 @@
-import { PDFDict, PDFDocument, PDFName, PDFNumber, PDFRawStream, PDFRef } from 'pdf-lib';
+import { decodePDFRawStream, PDFDict, PDFDocument, PDFName, PDFNumber, PDFRawStream, PDFRef } from 'pdf-lib';
 import { describe, expect, it } from 'vitest';
 import { readInklingAnnotations, writeInklingAnnotations } from '../../src/pdf/annotationSync';
 import { recordChanges } from '../../src/pdf/changeSet';
@@ -288,7 +288,8 @@ describe('highlighter appearance in the file', () => {
 			?.lookupMaybe(PDFName.of('BM'), PDFName)
 			?.decodeText();
 
-		return { ops: new TextDecoder().decode(stream.getContents()), blend };
+		// Deflated in the file, as every appearance is; read as a reader would.
+		return { ops: new TextDecoder().decode(decodePDFRawStream(stream).decode()), blend };
 	}
 
 	it('multiplies the highlight into the page rather than painting over it', async () => {

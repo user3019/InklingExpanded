@@ -29,6 +29,13 @@ export const INKLING_EXTRAS = 'Inkling';
 // file size, and these arrays are as long as the stroke is.
 export const PRESSURE_KEY = 'P';
 
+// The nib a pen stroke was drawn with (see PenBrush in annotate/types.ts),
+// as a name. Only written for a nib other than the plain pen, so a file
+// with no such strokes is byte for byte what it always was. Another reader
+// needs none of it — the appearance stream already holds the ink as the
+// nib drew it — but reading the stroke back needs it to redraw the same.
+export const BRUSH_KEY = 'B';
+
 // The document text an annotation covers, captured when it was drawn.
 //
 // Not in /Contents: that is where the *user's* note goes — the standard

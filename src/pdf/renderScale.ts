@@ -65,6 +65,21 @@ export function baseRenderScale(cssWidth: number, pagePointWidth: number, densit
 	return clamp((cssWidth * density) / pagePointWidth, MIN_RENDER_SCALE, MAX_RENDER_SCALE);
 }
 
+// The most pixels one canvas may hold: 4096 x 4096, which is the limit
+// Safari puts on a canvas on iPhone and iPad. Past it the canvas does not
+// fail loudly — it simply stays blank — so a page has to be backed less
+// densely instead. Only the largest pages ever meet it: a Letter page at the
+// full MAX_RENDER_SCALE is just over it, an infinite canvas (see
+// infiniteCanvas.ts) a few pages across is well over.
+export const MAX_CANVAS_PIXELS = 4096 * 4096;
+
+// `scale`, lowered as far as it has to be for a page of this size in points
+// to fit MAX_CANVAS_PIXELS.
+export function capToPixelBudget(scale: number, pagePointWidth: number, pagePointHeight: number): number {
+	if (!(pagePointWidth > 0) || !(pagePointHeight > 0)) return scale;
+	return Math.min(scale, Math.sqrt(MAX_CANVAS_PIXELS / (pagePointWidth * pagePointHeight)));
+}
+
 // The scale a page should be re-rendered at once a pinch-zoom settles.
 // `base` is what the page was backed at unzoomed, so the target keeps the
 // same one-canvas-pixel-per-device-pixel relationship at the new zoom.

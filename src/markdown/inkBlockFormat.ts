@@ -1,4 +1,5 @@
 import type { Annotation, DrawToolType, Point, ShapeToolType } from '../annotate';
+import { isPenBrush } from '../annotate/types';
 
 // The fenced-block language that marks an ink block in a note. Short and
 // readable on purpose: it's what shows up in the raw Markdown, and someone
@@ -183,7 +184,10 @@ function readAnnotation(value: unknown): Annotation | null {
 			}
 		}
 		if (!points || points.length === 0) return null;
-		return { id, color, width, kind: 'stroke', tool: tool as DrawToolType, points };
+		// A nib this build does not know — written by a newer one — draws as
+		// the plain pen rather than costing the stroke.
+		const brush = tool === 'pen' && isPenBrush(raw.brush) && raw.brush !== 'pen' ? raw.brush : undefined;
+		return { id, color, width, kind: 'stroke', tool: tool as DrawToolType, points, ...(brush ? { brush } : {}) };
 	}
 
 	if (kind === 'shape') {

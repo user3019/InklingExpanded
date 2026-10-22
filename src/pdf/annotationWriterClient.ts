@@ -44,6 +44,9 @@ export interface OpenResult {
 	// scales its save cadence on it, and pairs it with a feature check for
 	// Vault.appendBinary — which this side of the wire cannot see.
 	incremental: boolean;
+	// Each page's identity in the file, by index — see pageIdsOf in
+	// annotationWriterCore.ts.
+	pageIds: string[];
 }
 
 // What a save produced. The two go to different Vault calls, so the view is
@@ -113,6 +116,7 @@ export class AnnotationWriterClient {
 				profile: opened.profile,
 				risky: opened.risky,
 				incremental: opened.incremental,
+				pageIds: opened.pageIds,
 			};
 		}
 
@@ -290,6 +294,7 @@ export class AnnotationWriterClient {
 				profile: message.profile,
 				risky: message.risky,
 				incremental: message.incremental,
+				pageIds: message.pageIds,
 			} as never);
 		} else if (message.type === 'written') {
 			entry.resolve(message.outcome as never);

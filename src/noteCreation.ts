@@ -1,7 +1,16 @@
-import { App, Modal, Notice, Plugin, Setting, TFile, TFolder, normalizePath } from 'obsidian';
+import { App, Modal, Notice, Plugin, TFile, TFolder, normalizePath, setIcon } from 'obsidian';
 import { toArrayBuffer } from './binary';
 import { VIEW_TYPE_PDF } from './pdfView';
-import { createHandwrittenNoteBytes, TEMPLATE_STYLE_LABELS, TEMPLATE_STYLES, TemplateStyle, type PageSizeName } from './templates';
+import {
+	CANVAS_MODE_LABELS,
+	CANVAS_MODES,
+	createHandwrittenNoteBytes,
+	TEMPLATE_STYLE_LABELS,
+	TEMPLATE_STYLES,
+	TemplateStyle,
+	type CanvasMode,
+	type PageSizeName,
+} from './templates';
 
 // The two settings note creation cares about, passed in rather than
 // reached for: this module is handed a Plugin, not the Inkling plugin,
@@ -10,6 +19,7 @@ import { createHandwrittenNoteBytes, TEMPLATE_STYLE_LABELS, TEMPLATE_STYLES, Tem
 export interface NoteCreationDefaults {
 	template: TemplateStyle;
 	pageSize: PageSizeName;
+	canvasMode: CanvasMode;
 }
 
 const DEFAULT_NAME = 'Untitled note';
@@ -18,66 +28,113 @@ const INVALID_FILENAME_CHARS = /[\\/:*?"<>|]/g;
 class CreateHandwrittenNoteModal extends Modal {
 	private name = DEFAULT_NAME;
 	private style: TemplateStyle;
+	private mode: CanvasMode;
 
 	constructor(
 		app: App,
 		defaultStyle: TemplateStyle,
-		private readonly onSubmit: (name: string, style: TemplateStyle) => void,
+		defaultMode: CanvasMode,
+		private readonly onSubmit: (name: string, style: TemplateStyle, mode: CanvasMode) => void,
 	) {
 		super(app);
 		// The dropdown opens on the preferred template, but stays a
 		// dropdown: a default is a starting point, not a decision made on
 		// the user’s behalf every time.
 		this.style = defaultStyle;
+		this.mode = defaultMode;
 	}
 
 	onOpen(): void {
-		this.setTitle('Create handwritten note');
-		// Obsidian styles its own modals off these classes; without them this
-		// one sat with settings-sized rows in an unpadded box, which is why
-		// it read as noticeably plainer than the app's own dialogs.
-		this.modalEl.addClass('mod-confirmation');
+		this.setTitle('New handwritten note');
+		this.modalEl.addClass('inkling-create-note');
 		this.contentEl.addClass('inkling-create-note-modal');
 
-		let textInputEl: HTMLInputElement | undefined;
+		const nameField = this.contentEl.createDiv({ cls: 'inkling-create-field' });
+		nameField.createEl('label', { cls: 'inkling-create-label', text: 'Name', attr: { for: 'inkling-create-name' } });
+		const nameInput = nameField.createEl('input', { cls: 'inkling-create-name', attr: { id: 'inkling-create-name', type: 'text' } });
+		nameInput.placeholder = DEFAULT_NAME;
+		nameInput.value = this.name;
+		nameInput.addEventListener('input', () => (this.name = nameInput.value));
+		nameInput.addEventListener('keydown', (event) => {
+			if (event.key === 'Enter') this.submit();
+		});
+		nameField.createDiv({ cls: 'inkling-create-hint', text: 'Saved as a PDF beside the note you have open.' });
 
-		new Setting(this.contentEl)
-			.setName('Name')
-			.setDesc('Saved as a PDF beside the note you have open.')
-			.addText((text) => {
-				textInputEl = text.inputEl;
-				text.setPlaceholder(DEFAULT_NAME);
-				text.setValue(this.name).onChange((value) => (this.name = value));
-				text.inputEl.addEventListener('keydown', (event) => {
-					if (event.key === 'Enter') this.submit();
-				});
+		// Tiles to tap rather than dropdowns: on a tablet a dropdown is a
+		// second screen to open and close, and a tile shows what it is.
+		this.choices(
+			'Paper',
+			CANVAS_MODES.map((mode) => ({
+				value: mode,
+				label: CANVAS_MODE_LABELS[mode],
+				hint: mode === 'infinite' ? 'Grows as you write' : 'Add pages as you go',
+				icon: mode === 'infinite' ? 'infinity' : 'files',
+			})),
+			() => this.mode,
+			(mode) => (this.mode = mode),
+		);
+		this.choices(
+			'Background',
+			TEMPLATE_STYLES.map((style) => ({ value: style, label: TEMPLATE_STYLE_LABELS[style], pattern: style })),
+			() => this.style,
+			(style) => (this.style = style),
+		);
+
+		const buttons = this.contentEl.createDiv({ cls: 'modal-button-container' });
+		const cancel = buttons.createEl('button', { text: 'Cancel' });
+		cancel.type = 'button';
+		cancel.addEventListener('click', () => this.close());
+		const create = buttons.createEl('button', { cls: 'mod-cta', text: 'Create' });
+		create.type = 'button';
+		create.addEventListener('click', () => this.submit());
+
+		nameInput.focus();
+		nameInput.select();
+	}
+
+	// A row of tiles, one per option, of which one is chosen.
+	private choices<T extends string>(
+		title: string,
+		options: Array<{ value: T; label: string; hint?: string; icon?: string; pattern?: TemplateStyle }>,
+		current: () => T,
+		choose: (value: T) => void,
+	): void {
+		const group = this.contentEl.createDiv({ cls: 'inkling-create-field' });
+		group.createDiv({ cls: 'inkling-create-label', text: title });
+		const row = group.createDiv({ cls: 'inkling-choice-row' });
+		row.setAttribute('role', 'radiogroup');
+		row.setAttribute('aria-label', title);
+		const tiles: Array<{ value: T; tile: HTMLButtonElement }> = [];
+		const show = () => {
+			for (const { value, tile } of tiles) {
+				const chosen = value === current();
+				tile.toggleClass('is-chosen', chosen);
+				tile.setAttribute('aria-checked', String(chosen));
+			}
+		};
+		for (const option of options) {
+			const tile = row.createEl('button', { cls: 'inkling-choice' });
+			tile.type = 'button';
+			tile.setAttribute('role', 'radio');
+			const preview = tile.createDiv({ cls: 'inkling-choice-preview' });
+			if (option.pattern) preview.addClass(`is-${option.pattern}`);
+			if (option.icon) setIcon(preview, option.icon);
+			tile.createDiv({ cls: 'inkling-choice-label', text: option.label });
+			if (option.hint) tile.createDiv({ cls: 'inkling-choice-hint', text: option.hint });
+			tile.addEventListener('click', () => {
+				choose(option.value);
+				show();
 			});
-
-		new Setting(this.contentEl)
-			.setName('Template')
-			.setDesc('The ruling printed on every page, including pages added later.')
-			.addDropdown((dropdown) => {
-				for (const style of TEMPLATE_STYLES) dropdown.addOption(style, TEMPLATE_STYLE_LABELS[style]);
-				dropdown.setValue(this.style).onChange((value) => (this.style = value as TemplateStyle));
-			});
-
-		// The button row, not another labelled setting — `mod-button-row`
-		// right-aligns it and drops the divider a plain Setting draws, so
-		// Create doesn't look like the value half of a nameless row.
-		new Setting(this.contentEl)
-			.setClass('mod-button-row')
-			.addButton((button) => button.setButtonText('Cancel').onClick(() => this.close()))
-			.addButton((button) => button.setButtonText('Create').setCta().onClick(() => this.submit()));
-
-		textInputEl?.focus();
-		textInputEl?.select();
+			tiles.push({ value: option.value, tile });
+		}
+		show();
 	}
 
 	private submit(): void {
 		const name = this.name.trim();
 		if (!name) return;
 		this.close();
-		this.onSubmit(name, this.style);
+		this.onSubmit(name, this.style, this.mode);
 	}
 
 	onClose(): void {
@@ -107,9 +164,10 @@ async function createHandwrittenNote(
 	baseName: string,
 	style: TemplateStyle,
 	pageSize: PageSizeName,
+	mode: CanvasMode,
 ): Promise<TFile> {
 	const path = getUniqueNotePath(app, folder, baseName);
-	const bytes = await createHandwrittenNoteBytes(style, pageSize);
+	const bytes = await createHandwrittenNoteBytes(style, pageSize, mode);
 	return app.vault.createBinary(path, toArrayBuffer(bytes));
 }
 
@@ -118,10 +176,10 @@ function getTargetFolder(app: App): TFolder {
 }
 
 function openCreateNoteModal(app: App, folder: TFolder, defaults: NoteCreationDefaults): void {
-	new CreateHandwrittenNoteModal(app, defaults.template, (name, style) => {
+	new CreateHandwrittenNoteModal(app, defaults.template, defaults.canvasMode, (name, style, mode) => {
 		void (async () => {
 			try {
-				const file = await createHandwrittenNote(app, folder, name, style, defaults.pageSize);
+				const file = await createHandwrittenNote(app, folder, name, style, defaults.pageSize, mode);
 				// A brand-new handwritten note is created specifically to be
 				// written on right away — opened straight into Inkling's edit
 				// view rather than `openFile`'s default extension resolution,

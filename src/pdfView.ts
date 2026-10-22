@@ -1,19 +1,52 @@
-import { FileView, Notice, setIcon, TFile, WorkspaceLeaf } from 'obsidian';
-import { AnnotationMode, getDocument, RenderingCancelledException, type PageViewport, type PDFDocumentProxy, type PDFPageProxy } from 'pdfjs-dist';
+import { FileView, Menu, Notice, setIcon, setTooltip, TFile, WorkspaceLeaf } from 'obsidian';
+import { chooseDeviceFile, chooseVaultFile, PICTURE_EXTENSIONS, placePicture, preparePicture } from './importing';
+import { refreshCoreReaders } from './coreViews';
+import { AnnotationMode, getDocument, RenderingCancelledException, type PageViewport, type PDFDocumentProxy, type PDFPageProxy, type RenderTask } from 'pdfjs-dist';
 import { PDFDocument } from 'pdf-lib';
-import { AnnotationController, buildToolbar, paletteFor, ToolState, type Annotation, type Point, type ToolType } from './annotate';
+import { AnnotationController, buildToolbar, HistoryStack, paletteFor, ToolState, type Annotation, type Point, type ToolType } from './annotate';
+import { attachViewNavigation, type ViewZoom } from './annotate/pointer';
 import { createId } from './annotate/id';
-import { AnnotationWriterClient } from './pdf/annotationWriterClient';
+import { AnnotationWriterClient, type OpenResult } from './pdf/annotationWriterClient';
+import { sameInFile } from './pdf/annotationSync';
+import { mergeAnnotations } from './markdown/mergeInkBlocks';
 import { toArrayBuffer } from './binary';
 import { appendBinarySafely, canAppendBinary, writeBinarySafely } from './vaultWrite';
 import { compareProfiles, formatMediaBox, normalizeRotation, samplePageIndices, type StructureProfile } from './pdf/compatibility';
 import { findMatches, flattenOutline, type OutlineEntry } from './pdf/navigation';
 import { BASELINE_DESCENT_RATIO, groupIntoLines, highlightBarHeight, quoteBetween, type PositionedBox, type TextLine } from './pdf/textLines';
-import { RENDER_SCALE, baseRenderScale, layoutRenderScale, zoomedRenderScale } from './pdf/renderScale';
+import { MAX_CANVAS_PIXELS, RENDER_SCALE, baseRenderScale, capToPixelBudget, layoutRenderScale, zoomedRenderScale } from './pdf/renderScale';
+import {
+	EDGE_ZONE,
+	GROW_STEP_X,
+	GROW_STEP_Y,
+	INFINITE_BASE_WIDTH,
+	boundsOf,
+	boxFromView,
+	edgesNear,
+	growBox,
+	isInfiniteCanvasKeywords,
+	type Edge,
+	type Growth,
+	type PdfBox,
+} from './pdf/infiniteCanvas';
 import { maxWriteIntervalMs } from './pdf/saveCadence';
 import { placeWithin } from './pdf/popoverPlacement';
 import { defaultSettings, type InklingSettings } from './settings';
-import { applyTemplateStyle, pageSizeFor, parseTemplateStyleFromKeywords, readTemplateStyle } from './templates';
+import {
+	applyTemplateStyle,
+	pageSizeFor,
+	parseTemplateStyleFromKeywords,
+	readTemplateStyle,
+	setInfiniteCanvasBox,
+	TEMPLATE_STYLE_LABELS,
+	TEMPLATE_STYLES,
+	type TemplateStyle,
+} from './templates';
+import { setPageBackground } from './pdf/pageBackground';
+import { backUp, type BackupReason } from './backups';
+
+// The menu's icons for each background.
+const BACKGROUND_ICONS: Record<TemplateStyle, string> = { blank: 'square', lined: 'align-justify', 'dot-grid': 'grip' };
 
 // pdfjs-dist is pinned to an exact version (see package.json) — 5.4.624+
 // calls Uint8Array.prototype.toHex() unconditionally when computing a PDF's
@@ -47,6 +80,13 @@ const PAGE_RETAIN_MARGIN = 3;
 // successive strokes into one save matters more here than for most
 // autosave features (see the plan's Write granularity note).
 const WRITE_DEBOUNCE_MS = 1500;
+// The same, while another device is writing to the file too (see
+// pullRemote): ink goes to disk, and so to the other device, as soon as the
+// pen lifts, rather than after a pause.
+const SHARED_WRITE_DEBOUNCE_MS = 300;
+// How long after the file changes on disk the change is read. A sync can
+// land a file in more than one write, and the last one is the one to read.
+const REMOTE_SETTLE_MS = 250;
 
 // How far a note's editor sits from the point it annotates, and from the
 // page's edges when it has to be pulled back inside them.
@@ -56,6 +96,74 @@ const WRITE_DEBOUNCE_MS = 1500;
 // accounts for the same offset that nudges it clear of the marker. As a
 // margin it was invisible to that arithmetic.
 const NOTE_POPOVER_MARGIN = 8;
+
+// How long after the last stroke an infinite canvas checks whether its ink
+// has come near an edge, and how long a scroll has to have stopped before
+// it counts as having arrived at one.
+const GROW_AFTER_INK_MS = 1200;
+const GROW_AFTER_SCROLL_MS = 400;
+// How often a grown page, rendered and ready, checks whether the pen has
+// lifted so it can be swapped in.
+const GROW_IDLE_POLL_MS = 50;
+// Scrolling the view itself — restoring the position after a growth, or
+// jumping to a page — is not the reader moving towards an edge. Scroll
+// events this soon after a load are not taken as one.
+const SCROLL_GROWTH_SETTLE_MS = 800;
+
+// How far the whole view can be zoomed: out far enough to see a spread of
+// pages at once, in as far as a page can usefully be rendered (see
+// MAX_RENDER_SCALE) — the same kind of range Obsidian's own reader has.
+const VIEW_MIN_ZOOM = 0.25;
+const VIEW_MAX_ZOOM = 5;
+
+// What a view zoom holds still: a point on one page, as a fraction of its
+// size, which is the one description of "this spot" that is still true
+// after every page has changed size.
+interface ViewAnchorPoint {
+	page: HTMLElement | null;
+	fx: number;
+	fy: number;
+}
+
+// The detail layer (see renderDetail): how far past the edges of the view a
+// sharp region reaches, as a share of the view's size, so that a short
+// scroll stays sharp; and how long scrolling has to pause before the region
+// is drawn again where the view has moved to.
+const DETAIL_MARGIN = 0.15;
+const DETAIL_DELAY_MS = 120;
+// How much sharper a page has to need to be than its canvas is before the
+// detail layer is worth drawing.
+const DETAIL_THRESHOLD = 1.1;
+
+// A page's sharp region, and the three canvases that draw it: the page
+// itself, its ink, and the stroke being drawn. Placed by fractions of the
+// page, which stay true however the view zooms afterwards.
+interface PageDetail {
+	left: number;
+	top: number;
+	right: number;
+	bottom: number;
+	// The page's full width, and the region's offset into it, in the detail
+	// canvases' pixels — what maps the page's canvas space onto them.
+	pageWidth: number;
+	offsetX: number;
+	offsetY: number;
+	pdf: HTMLCanvasElement | null;
+	ink: HTMLCanvasElement | null;
+	overlay: HTMLCanvasElement | null;
+	task: RenderTask | null;
+	generation: number;
+	inkFrame: number | null;
+	overlayFrame: number | null;
+}
+
+// Parts of the view a finger should work in rather than move the view by:
+// the tool strip, the outline and find panel (which scrolls by itself), and
+// a note being typed.
+const NAVIGATION_EXEMPT = '.inkling-toolbar, .inkling-nav-panel, .inkling-note-editor';
+
+// How long typing in the find field pauses before it searches.
+const FIND_AS_YOU_TYPE_MS = 300;
 
 // One press of a zoom key. Matches the step the toolbar buttons use, so
 // the two agree about what "zoom in once" means.
@@ -270,6 +378,13 @@ function readPageFromEphemeralState(state: unknown): number | null {
 	return null;
 }
 
+// Whether two lists hold the same annotations, as the file would.
+function sameSet(a: readonly Annotation[], b: readonly Annotation[]): boolean {
+	if (a.length !== b.length) return false;
+	const byId = new Map(b.map((annotation) => [annotation.id, annotation]));
+	return a.every((annotation) => sameInFile(annotation, byId.get(annotation.id)));
+}
+
 export class PdfAnnotateView extends FileView {
 	private readonly controller: AnnotationController;
 	private renderToken = 0;
@@ -308,6 +423,11 @@ export class PdfAnnotateView extends FileView {
 	// pane resize, say) would put every stroke on that page in the wrong
 	// place — the same reason renderedScales is reused rather than reset.
 	private baseScales = new Map<number, number>();
+	// The base scale before capToPixelBudget lowered it, where it did. Pen
+	// width is measured against this, so that a canvas too large to back at
+	// full density still takes ink at the width the pen says — just drawn
+	// with fewer pixels — rather than ink that thickens as the canvas grows.
+	private inkBaseScales = new Map<number, number>();
 	// The scale each page is laid out at — fitted to the pane, the way the
 	// core PDF view fits its own (see pdf/renderScale.ts). Kept per page
 	// rather than recomputed, for the same reason baseScales is: a page's
@@ -324,6 +444,13 @@ export class PdfAnnotateView extends FileView {
 	// Annotations read back from the file at open time, in PDF space,
 	// seeded into the controller as each page mounts.
 	private savedAnnotations = new Map<number, Annotation[]>();
+	// Each page's identity in the file the writer has open, by index — see
+	// pageIdsOf in pdf/annotationWriterCore.ts. What lets a change from
+	// another device be matched page for page when pages were added or
+	// deleted there.
+	private pageIds: string[] = [];
+	// A change from another device being taken in, while it is.
+	private pulling: Promise<void> | null = null;
 	// Owns the pdf-lib document, parsed once at open time and kept alive off
 	// the main thread for the life of the view, reused across every
 	// debounced write instead of re-reading and re-parsing the whole file
@@ -382,6 +509,49 @@ export class PdfAnnotateView extends FileView {
 	// it can arrive before onLoadFile has finished creating them, in which
 	// case scrollToPage would have nothing to find yet.
 	private pendingScrollToPage: number | null = null;
+	// The undo history, owned here rather than by the controller so that it
+	// can be carried into the new coordinate space an infinite canvas's page
+	// has each time it grows. Cleared on every load, as the controller's own
+	// was.
+	private readonly history = new HistoryStack();
+	// The open file's page box in PDF space, when it is an infinite canvas
+	// (see pdf/infiniteCanvas.ts); null for every other PDF.
+	private infiniteBox: PdfBox | null = null;
+	private growing = false;
+	private growAfterInkHandle: number | null = null;
+	private growAfterScrollHandle: number | null = null;
+	// Where the current scroll gesture started, for which way it went.
+	private scrollGestureStart: { left: number; top: number } | null = null;
+	private scrollGrowthArmedAt = 0;
+	private reportedCanvasLimit = false;
+	// How far the whole view is zoomed, 1 being every page fitted to the
+	// pane. Applied as a multiplier on every page's laid-out size (see
+	// --inkling-view-zoom in styles.css), so the pages grow and the view
+	// scrolls across them, as it does in Obsidian's own reader.
+	private viewZoomLevel = 1;
+	// The file as this view last wrote or read it, to tell its own saves
+	// from another device's when the file changes. And how many of its own
+	// writes are under way, for a change reported while one is.
+	private knownDisk: { path: string; size: number; mtime: number } | null = null;
+	private ownWrites = 0;
+	private remoteHandle: number | null = null;
+	// Whether another device has written to this file while it was open
+	// here — which makes this view save sooner (see markPageDirty).
+	private sharedWithAnotherDevice = false;
+	// Sharp regions of pages zoomed in past what their canvas can hold. See
+	// renderDetail.
+	private readonly details = new Map<number, PageDetail>();
+	private detailHandle: number | null = null;
+	private detailGeneration = 0;
+	private readonly viewZoom: ViewZoom = {
+		min: VIEW_MIN_ZOOM,
+		max: VIEW_MAX_ZOOM,
+		get: () => this.viewZoomLevel,
+		anchorAt: (at) => this.viewAnchorAt(at),
+		zoomTo: (scale, anchor, at) => this.zoomViewTo(scale, anchor as ViewAnchorPoint, at),
+		centre: () => this.viewCentre(),
+		settle: () => this.settleViewZoom(),
+	};
 	// The "opening…" placeholder, held so it can be taken down again from
 	// either of the two places that end the wait (pages ready, or a failure).
 	private loadingEl: HTMLElement | null = null;
@@ -397,7 +567,10 @@ export class PdfAnnotateView extends FileView {
 			// Shared with every other annotating surface, so the pen you set
 			// up in a note is the pen you get in a PDF (see annotate/toolState).
 			toolState,
+			history: this.history,
 			onAddPage: () => void this.addPage(),
+			onImport: (anchor) => this.showImportMenu(anchor),
+			onChangeBackground: (anchor) => this.showBackgroundMenu(anchor),
 			getCurrentPage: () => this.currentPageNumber,
 			onAnnotationsChanged: (pageNumber) => this.markPageDirty(pageNumber),
 			onZoomSettled: (pageNumber, scale) => void this.upgradeResolution(pageNumber, scale),
@@ -406,7 +579,7 @@ export class PdfAnnotateView extends FileView {
 			// since re-backed denser draws the same width in PDF space rather
 			// than a thinner one.
 			getInkScale: (pageNumber) => {
-				const base = this.baseScales.get(pageNumber);
+				const base = this.inkBaseScales.get(pageNumber) ?? this.baseScales.get(pageNumber);
 				const rendered = this.renderedScales.get(pageNumber);
 				return base && rendered ? rendered / base : 1;
 			},
@@ -414,10 +587,12 @@ export class PdfAnnotateView extends FileView {
 			onGoToPage: (pageNumber) => this.scrollToPage(pageNumber),
 			onToggleNavigation: () => this.toggleNavigationPanel(),
 			onEditNote: (pageNumber, point, existing) => this.editNote(pageNumber, point, existing),
-			isPressureEnabled: () => getSettings().pressure,
 			isShapeRecognitionEnabled: () => getSettings().shapeRecognition === 'hold',
 			onToggleInversion: () => this.toggleInversion(),
 			isInverted: () => this.isInverted(),
+			viewZoom: this.viewZoom,
+			getPenButtonAction: () => getSettings().penButton,
+			onPageRepainted: (pageNumber, layer) => this.repaintDetail(pageNumber, layer),
 		});
 	}
 
@@ -457,10 +632,32 @@ export class PdfAnnotateView extends FileView {
 		this.registerDomEvent(document, 'keydown', (event) => this.handleKey(event));
 		// contentEl is the scroll container, and outlives every file shown
 		// in it, so this is registered once here rather than per load.
-		this.registerDomEvent(this.contentEl, 'scroll', () => this.scheduleCurrentPageUpdate());
+		// Dragging, pinching and trackpad zoom, anywhere in the view — over a
+		// page, between pages, or beside them. See attachViewNavigation.
+		this.register(
+			attachViewNavigation(this.contentEl, this.viewZoom, {
+				ignore: (target) => target instanceof Element && target.closest(NAVIGATION_EXEMPT) !== null,
+				isBusy: () => this.controller.isGestureActive(),
+				onPinchStart: () => this.controller.abandonGesture(),
+				onLongPress: (at) => this.pickUpPictureAt(at),
+				onTap: (at) => this.tapAt(at),
+			}),
+		);
+		this.registerDomEvent(this.contentEl, 'scroll', () => {
+			this.scheduleCurrentPageUpdate();
+			this.onScrollForGrowth();
+			this.scheduleDetails();
+		});
 		// Obsidian fires this on a theme switch, which is what follow-theme
 		// has to react to.
 		this.registerEvent(this.app.workspace.on('css-change', () => this.applyInversion()));
+		// The file changing on disk while it is open: another device's save,
+		// arriving by sync. See pullRemote.
+		this.registerEvent(
+			this.app.vault.on('modify', (file) => {
+				if (file instanceof TFile && file === this.currentFile) this.onFileChanged(file);
+			}),
+		);
 	}
 
 	// Bare letters are safe here in a way they would not be in a note: this
@@ -508,6 +705,7 @@ export class PdfAnnotateView extends FileView {
 	}
 
 	private handlePlainKey(event: KeyboardEvent): boolean {
+		if (event.key === 'Escape') return this.controller.clearSelection();
 		// Navigation works whatever state the document is in. Reading a book
 		// Inkling refuses to write to is still reading a book.
 		if (event.key === 'PageDown') {
@@ -604,6 +802,14 @@ export class PdfAnnotateView extends FileView {
 		// this is what "erase/edit works, then reverts on reopen" traced
 		// back to.
 		await this.flushAnnotationsIfDirty(this.currentFile);
+		// A save that found the file changed by another device leaves its ink
+		// dirty for that change to be taken in first. Taken in now, and the
+		// ink saved on top of it: the teardown below would otherwise lose it.
+		const previous = this.currentFile;
+		if (previous && this.dirtyPages.size > 0 && (await this.changedOnDisk(previous))) {
+			await this.pullRemote(previous, true);
+			await this.flushAnnotationsIfDirty(previous);
+		}
 		this.currentFile = file;
 
 		const token = ++this.renderToken;
@@ -612,7 +818,7 @@ export class PdfAnnotateView extends FileView {
 		// A new document is a new question about legibility.
 		this.sessionInversion = null;
 		this.applyInversion();
-		this.disposeToolbar = buildToolbar(this.contentEl, this.controller);
+		this.disposeToolbar = buildToolbar(this.contentEl, this.controller, { app: this.app });
 		this.buildNavigationPanel();
 
 		// Everything below this point is asynchronous — reading the file,
@@ -639,6 +845,7 @@ export class PdfAnnotateView extends FileView {
 		this.maxWriteInterval = maxWriteIntervalMs(0);
 		this.consecutiveWriteFailures = 0;
 		const bytes = await this.app.vault.readBinary(file);
+		await this.rememberDisk(file);
 
 		// `this.teardown()` above already terminated the previous file's
 		// writer (if any) — this one is this load's own, kept local until we
@@ -666,9 +873,11 @@ export class PdfAnnotateView extends FileView {
 		// Vault.appendBinary at all — it is `@since 1.12.3` against a
 		// minAppVersion of 1.4.4.
 		let incremental = false;
+		let pageIds: string[] = [];
 		try {
 			writer = new AnnotationWriterClient();
 			const opened = await writer.open(bytes);
+			pageIds = opened.pageIds ?? [];
 			savedAnnotations = opened.savedAnnotations;
 			displayBytes = opened.displayBytes;
 			profile = opened.profile;
@@ -691,6 +900,7 @@ export class PdfAnnotateView extends FileView {
 		}
 		this.writer = writer;
 		this.savedAnnotations = savedAnnotations;
+		this.pageIds = pageIds;
 
 		// "Frequent" is stated as a zero size, which the size-scaled mapping
 		// already answers with its shortest interval — one place decides how
@@ -756,8 +966,19 @@ export class PdfAnnotateView extends FileView {
 		}
 		if (token !== this.renderToken) return;
 		const keywords = (metadata.info as { Keywords?: string }).Keywords;
-		this.controller.setCanManagePages(parseTemplateStyleFromKeywords(keywords) !== null);
-		const estimatedViewport = firstPage.getViewport({ scale: RENDER_SCALE });
+		// One page, or it is not a canvas whatever its keywords say: the
+		// growth below only ever reasons about page 1.
+		this.infiniteBox = isInfiniteCanvasKeywords(keywords) && pdf.numPages === 1 ? boxFromView(firstPage.view) : null;
+		this.contentEl.toggleClass('is-infinite', this.infiniteBox !== null);
+		// "Add page" means nothing on a sheet that grows by itself.
+		this.controller.setCanManagePages(parseTemplateStyleFromKeywords(keywords) !== null && this.infiniteBox === null);
+		this.controller.setIsNote(parseTemplateStyleFromKeywords(keywords) !== null);
+		// A canvas is laid out at its real size from the start rather than at
+		// an estimate: it is usually far from the size of a page, and an
+		// estimate would jump when the real one arrived.
+		const estimatedViewport = firstPage.getViewport({
+			scale: this.infiniteBox ? this.layoutScaleFor(1, INFINITE_BASE_WIDTH) : RENDER_SCALE,
+		});
 
 		// Stays subscribed to every placeholder for the life of the view
 		// (never unobserved) — it doubles as the "which page is the user
@@ -804,6 +1025,8 @@ export class PdfAnnotateView extends FileView {
 			this.scrollToPage(this.pendingScrollToPage);
 			this.pendingScrollToPage = null;
 		}
+
+		this.scrollGrowthArmedAt = performance.now() + SCROLL_GROWTH_SETTLE_MS;
 	}
 
 	async onUnloadFile(): Promise<void> {
@@ -848,6 +1071,22 @@ export class PdfAnnotateView extends FileView {
 		this.pageCanvases.clear();
 		this.renderedScales.clear();
 		this.baseScales.clear();
+		this.inkBaseScales.clear();
+		this.history.clear();
+		this.infiniteBox = null;
+		this.contentEl.classList.remove('is-infinite');
+		this.cancelGrowthChecks();
+		this.reportedCanvasLimit = false;
+		if (this.remoteHandle !== null) window.clearTimeout(this.remoteHandle);
+		this.remoteHandle = null;
+		this.sharedWithAnotherDevice = false;
+		for (const pageNumber of [...this.details.keys()]) this.removeDetail(pageNumber);
+		if (this.detailHandle !== null) window.clearTimeout(this.detailHandle);
+		this.detailHandle = null;
+		if (this.viewZoomLevel !== 1) {
+			this.viewZoomLevel = 1;
+			this.contentEl.setCssProps({ '--inkling-view-zoom': '1' });
+		}
 		this.layoutScales.clear();
 		this.upgradingPages.clear();
 		this.textLines.clear();
@@ -869,6 +1108,7 @@ export class PdfAnnotateView extends FileView {
 		this.dirtyPages.clear();
 		this.writer?.terminate();
 		this.writer = null;
+		this.pageIds = [];
 		void this.pdf?.destroy();
 		this.pdf = null;
 		this.controller.unmountAll();
@@ -945,7 +1185,10 @@ export class PdfAnnotateView extends FileView {
 		// The toolbar's readouts are the only thing watching this, and
 		// scrolling isn't something the controller can observe for itself —
 		// so tell it, but only on an actual change.
-		if (this.currentPageNumber !== previousPageNumber) this.controller.refreshUi();
+		if (this.currentPageNumber !== previousPageNumber) {
+			this.controller.refreshUi();
+			this.markCurrentChapter();
+		}
 	}
 
 	// Tears scrolled-far-away pages back down to bare placeholders — see
@@ -973,6 +1216,7 @@ export class PdfAnnotateView extends FileView {
 		const placeholder = this.contentEl.querySelector<HTMLElement>(
 			`.inkling-pdf-page-placeholder[data-page-number="${pageNumber}"]`,
 		);
+		this.removeDetail(pageNumber);
 		placeholder?.querySelector('.inkling-page-content')?.remove();
 
 		this.controller.unmountPage(pageNumber);
@@ -1005,11 +1249,22 @@ export class PdfAnnotateView extends FileView {
 		// upgradeResolution sharpen a pinch-zoomed page by raising only the
 		// backing store, with no reflow.
 		const pagePointWidth = page.getViewport({ scale: 1 }).width;
-		const layoutScale = this.layoutScaleFor(pageNumber, pagePointWidth);
+		// A canvas keeps the zoom its starting page was fitted at, however wide
+		// it has grown, so that growing never shrinks the ink already on it.
+		const layoutScale = this.layoutScaleFor(pageNumber, this.infiniteBox ? INFINITE_BASE_WIDTH : pagePointWidth);
 		const layoutViewport = page.getViewport({ scale: layoutScale });
 		sizePlaceholder(placeholder, layoutViewport.width, layoutViewport.height);
 
-		const scale = this.renderedScales.get(pageNumber) ?? this.baseScaleFor(pageNumber, layoutViewport.width, pagePointWidth);
+		const pagePointHeight = page.getViewport({ scale: 1 }).height;
+		// A page rendered for the first time while the view is zoomed is
+		// rendered for the zoom, not for its fitted size and then again.
+		const scale =
+			this.renderedScales.get(pageNumber) ??
+			capToPixelBudget(
+				zoomedRenderScale(this.baseScaleFor(pageNumber, layoutViewport.width, pagePointWidth, pagePointHeight), this.viewZoomLevel),
+				pagePointWidth,
+				pagePointHeight,
+			);
 		const viewport = page.getViewport({ scale });
 
 		// A separate transformable layer inside the placeholder's fixed-size
@@ -1068,6 +1323,10 @@ export class PdfAnnotateView extends FileView {
 				this.controller.seedPage(pageNumber, saved.map((a) => toCanvasSpace(a, viewport)));
 			}
 		}
+		// A recycled page comes back at the scale it left at, which the view
+		// may since have been zoomed well away from.
+		void this.upgradeResolution(pageNumber, this.viewZoomLevel);
+		this.scheduleDetails();
 
 		// Not awaited — a highlighter stroke drawn before this resolves just
 		// falls back to committing as freehand (see snapHighlighterStroke),
@@ -1098,12 +1357,14 @@ export class PdfAnnotateView extends FileView {
 	// narrow pane is rendered for the size it is really displayed at instead
 	// of the size it would have liked to be — the memory saved there is what
 	// pays for the density.
-	private baseScaleFor(pageNumber: number, layoutWidth: number, pagePointWidth: number): number {
+	private baseScaleFor(pageNumber: number, layoutWidth: number, pagePointWidth: number, pagePointHeight: number): number {
 		const existing = this.baseScales.get(pageNumber);
 		if (existing !== undefined) return existing;
 
-		const scale = baseRenderScale(layoutWidth, pagePointWidth, window.devicePixelRatio || 1);
+		const ideal = baseRenderScale(layoutWidth, pagePointWidth, window.devicePixelRatio || 1);
+		const scale = capToPixelBudget(ideal, pagePointWidth, pagePointHeight);
 		this.baseScales.set(pageNumber, scale);
+		this.inkBaseScales.set(pageNumber, ideal);
 		return scale;
 	}
 
@@ -1149,14 +1410,21 @@ export class PdfAnnotateView extends FileView {
 		// constant, so zooming in keeps the one-canvas-pixel-per-device-pixel
 		// relationship the unzoomed page already has instead of dropping back
 		// to it.
-		const targetScale = zoomedRenderScale(base, zoomScale);
-		// Not worth a re-render for a marginal gain — and never for one that
-		// would make things *blurrier* (e.g. the user zoomed back out).
-		if (targetScale <= currentScale * 1.15) return;
-
 		const canvas = this.pageCanvases.get(pageNumber);
 		const oldViewport = this.viewports.get(pageNumber);
 		if (!canvas || !oldViewport) return;
+		// And never past what one canvas can hold, which a large page — an
+		// infinite canvas especially — reaches long before MAX_RENDER_SCALE.
+		const targetScale = capToPixelBudget(
+			zoomedRenderScale(base, zoomScale),
+			oldViewport.width / oldViewport.scale,
+			oldViewport.height / oldViewport.scale,
+		);
+		// Not worth a re-render for a marginal gain. Downwards only once the
+		// page is backed far denser than it is now shown: a page zoomed in on
+		// and then zoomed back out from would otherwise keep its large canvas,
+		// and with the whole view zoomed out there can be many of them.
+		if (targetScale <= currentScale * 1.15 && targetScale >= currentScale / 1.5) return;
 
 		this.upgradingPages.add(pageNumber);
 		const token = this.renderToken;
@@ -1193,6 +1461,7 @@ export class PdfAnnotateView extends FileView {
 			}
 		} finally {
 			this.upgradingPages.delete(pageNumber);
+			this.scheduleDetails();
 		}
 	}
 
@@ -1257,9 +1526,13 @@ export class PdfAnnotateView extends FileView {
 
 	private markPageDirty(pageNumber: number): void {
 		this.dirtyPages.add(pageNumber);
+		if (this.infiniteBox) this.scheduleGrowthFromInk();
 
 		if (this.writeDebounceHandle !== null) window.clearTimeout(this.writeDebounceHandle);
-		this.writeDebounceHandle = window.setTimeout(() => this.flushCurrentFileIfAny(), WRITE_DEBOUNCE_MS);
+		this.writeDebounceHandle = window.setTimeout(
+			() => this.flushCurrentFileIfAny(),
+			this.sharedWithAnotherDevice ? SHARED_WRITE_DEBOUNCE_MS : WRITE_DEBOUNCE_MS,
+		);
 
 		// Deliberately NOT reset here the way writeDebounceHandle above is.
 		// Only armed when nothing's already pending, so it fires a fixed time
@@ -1345,11 +1618,24 @@ export class PdfAnnotateView extends FileView {
 		this.dirtyPages.clear();
 
 		try {
+			// The file changed since this view last knew it — another device's
+			// save, landed by a sync. A save now would be built on the file as
+			// it was and written over theirs: their pages, their pictures,
+			// their ink, gone, and ours put back by page number into a file
+			// whose pages no longer have those numbers. That was how a note
+			// open on a tablet and a laptop at once could come back with its
+			// ink heaped onto the wrong pages. So theirs is taken in first —
+			// merged, page by page — and ours saved on top of it.
+			if (await this.changedOnDisk(file)) {
+				for (const pageNumber of pageNumbers) this.dirtyPages.add(pageNumber);
+				void this.pullRemote(file);
+				return;
+			}
+
 			const pages = pageNumbers.flatMap((pageNumber) => {
 				const viewport = this.viewports.get(pageNumber);
 				if (!viewport) return [];
 				const annotations = this.controller.getPageAnnotations(pageNumber).map((a) => toPdfSpace(a, viewport));
-				this.savedAnnotations.set(pageNumber, annotations);
 				return [{ pageNumber, annotations }];
 			});
 
@@ -1359,7 +1645,7 @@ export class PdfAnnotateView extends FileView {
 			const outcome = await this.writer.write(pages);
 			if (outcome.mode === 'append') {
 				try {
-					await appendBinarySafely(this.app.vault, file, outcome.appendix, outcome.baseLength);
+					await this.ownWrite(file, () => appendBinarySafely(this.app.vault, file, outcome.appendix, outcome.baseLength));
 				} catch (error) {
 					// An append that did not land — most likely because sync
 					// moved the file underneath us — must never be retried as
@@ -1371,10 +1657,13 @@ export class PdfAnnotateView extends FileView {
 					throw error;
 				}
 			} else {
-				await writeBinarySafely(this.app.vault, file, outcome.bytes);
+				await this.ownWrite(file, () => writeBinarySafely(this.app.vault, file, outcome.bytes));
 			}
 			// Only now may the writer advance its idea of what is on disk.
 			await this.writer.commit();
+			// And only now is this what the file holds — the base the next
+			// change from another device is merged against.
+			for (const page of pages) this.savedAnnotations.set(page.pageNumber, page.annotations);
 			this.consecutiveWriteFailures = 0;
 		} catch (error) {
 			console.error('Inkling: failed to save annotations.', error);
@@ -1397,39 +1686,1117 @@ export class PdfAnnotateView extends FileView {
 	}
 
 	private async addPage(): Promise<void> {
-		const file = this.currentFile;
-		if (!file || this.addingPage) return;
-		this.addingPage = true;
-
-		try {
-			// Add Page does its own read-modify-write of the file below —
-			// make sure any not-yet-saved ink is flushed first, or it would
-			// be silently dropped when this insert reloads the view from a
-			// version of the file that never had it.
-			await this.flushAnnotationsIfDirty(file);
-
-			const bytes = await this.app.vault.readBinary(file);
+		await this.rebuild('add-page', 'could not add a page to this note.', async (bytes) => {
 			const pdfDoc = await PDFDocument.load(bytes);
-
 			// currentPageNumber is 1-based; as a 0-based insertion index that
 			// is exactly "right after the page the user is currently on".
 			const insertIndex = Math.min(this.currentPageNumber, pdfDoc.getPageCount());
 			const style = readTemplateStyle(pdfDoc);
 			const newPage = pdfDoc.insertPage(insertIndex, pageSizeFor(this.getSettings().pageSize));
 			applyTemplateStyle(newPage, style);
+			return { bytes: toArrayBuffer(await pdfDoc.save()), scrollTo: insertIndex + 1 };
+		});
+	}
 
-			const updatedBytes = await pdfDoc.save();
-			await writeBinarySafely(this.app.vault, file, toArrayBuffer(updatedBytes));
+	// ---- Rebuilding the file ----
+	//
+	// Adding a page, inserting another PDF's pages and changing a background
+	// all rewrite the whole file with pdf-lib, then reload the view from it.
+	// Each used to do that on its own, with nothing stopping the rest of the
+	// view meanwhile — and a stroke drawn while the file was being rebuilt
+	// was saved by the writer that still knew the file as it had been, over
+	// the rebuilt one or at an offset in it that no longer meant anything.
+	// That is how a note could come back with its pages gone and its ink
+	// heaped onto the wrong one.
+	//
+	// So a rebuild is one step, and nothing else touches the file during it:
+	//   - drawing is paused (read-only) from the first moment to the reload;
+	//   - unsaved ink is saved first, and if it cannot be, nothing is rebuilt;
+	//   - the save slot is held, so no save, growth or change from another
+	//     device lands in between the read and the write;
+	//   - the file as it was is kept as a backup (see backups.ts), so even a
+	//     rebuild gone wrong costs nothing that "Restore an earlier version of
+	//     this PDF" cannot bring back.
+	private async rebuild(
+		reason: BackupReason,
+		failure: string,
+		change: (bytes: ArrayBuffer) => Promise<{ bytes: ArrayBuffer; scrollTo: number; notice?: string } | null>,
+	): Promise<boolean> {
+		const file = this.currentFile;
+		if (!file || this.addingPage || this.growing || this.controller.isReadOnly()) return false;
+		this.addingPage = true;
+		const token = this.renderToken;
+		this.controller.setReadOnly(true);
+		let reloading = false;
+		try {
+			await this.flushAnnotationsIfDirty(file);
+			// Another device's change not taken in yet: taken in first, so the
+			// rebuild is of the note as it now is everywhere. If that reloads
+			// the view — pages added or deleted there — the page numbers this
+			// rebuild was asked with mean other pages now, and it stops.
+			if (this.dirtyPages.size > 0 || (await this.changedOnDisk(file))) {
+				await this.pullRemote(file, true);
+				if (token !== this.renderToken) return false;
+				await this.flushAnnotationsIfDirty(file);
+			}
+			while (this.saving) await this.saving.catch(() => undefined);
+			if (token !== this.renderToken || file !== this.currentFile) return false;
+			// A save that failed leaves its pages dirty, and the reload below
+			// would lose them.
+			if (this.dirtyPages.size > 0) throw new Error('the ink on this note could not be saved first');
 
-			const newPageNumber = insertIndex + 1;
+			let release: () => void = () => undefined;
+			this.saving = new Promise<void>((resolve) => (release = resolve));
+			const slot = this.saving;
+			let result: { bytes: ArrayBuffer; scrollTo: number; notice?: string } | null;
+			try {
+				const before = await this.app.vault.readBinary(file);
+				result = await change(before);
+				if (!result) return false;
+				await backUp(this.app, file, before, reason);
+				const rebuilt = result.bytes;
+				await this.ownWrite(file, () => writeBinarySafely(this.app.vault, file, rebuilt));
+			} finally {
+				release();
+				if (this.saving === slot) this.saving = null;
+			}
+
+			reloading = true;
 			await this.onLoadFile(file);
-			this.scrollToPage(newPageNumber);
+			this.scrollToPage(result.scrollTo);
+			void refreshCoreReaders(this.app, file);
+			if (result.notice) new Notice(result.notice);
+			return true;
 		} catch (error) {
-			console.error('Inkling: failed to add a page.', error);
-			new Notice('Inkling: could not add a page to this note.');
+			console.error(`Inkling: ${failure}`, error);
+			new Notice(`Inkling: ${failure}`);
+			return false;
 		} finally {
 			this.addingPage = false;
+			// A reload decides for itself whether the file can be written.
+			if (!reloading && token === this.renderToken) this.controller.setReadOnly(false);
 		}
+	}
+
+	// ---- View zoom ----
+
+	private viewAnchorAt(at: Point): ViewAnchorPoint {
+		// The page under the point, or failing that the nearest one above or
+		// below it — a pinch can start in the gap between two pages.
+		let best: { page: HTMLElement; rect: DOMRect } | null = null;
+		let bestDistance = Infinity;
+		for (const page of Array.from(this.contentEl.querySelectorAll<HTMLElement>('.inkling-pdf-page-placeholder'))) {
+			const rect = page.getBoundingClientRect();
+			const distance = at.y < rect.top ? rect.top - at.y : at.y > rect.bottom ? at.y - rect.bottom : 0;
+			if (distance < bestDistance) {
+				best = { page, rect };
+				bestDistance = distance;
+			}
+			if (distance === 0) break;
+		}
+		if (!best || best.rect.width === 0 || best.rect.height === 0) return { page: null, fx: 0, fy: 0 };
+		return { page: best.page, fx: (at.x - best.rect.left) / best.rect.width, fy: (at.y - best.rect.top) / best.rect.height };
+	}
+
+	private zoomViewTo(scale: number, anchor: ViewAnchorPoint, at: Point): void {
+		const next = Math.min(Math.max(scale, VIEW_MIN_ZOOM), VIEW_MAX_ZOOM);
+		if (next !== this.viewZoomLevel) {
+			this.viewZoomLevel = next;
+			this.contentEl.setCssProps({ '--inkling-view-zoom': String(next) });
+			// The toolbar's readout, kept current through the whole gesture.
+			this.controller.refreshUi();
+		}
+		// Measured after the change, which lays the pages out at their new
+		// size, so the scroll lands the anchor exactly under the point.
+		if (!anchor.page?.isConnected) return;
+		const rect = anchor.page.getBoundingClientRect();
+		this.contentEl.scrollLeft += rect.left + anchor.fx * rect.width - at.x;
+		this.contentEl.scrollTop += rect.top + anchor.fy * rect.height - at.y;
+	}
+
+	private viewCentre(): Point {
+		const rect = this.contentEl.getBoundingClientRect();
+		return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
+	}
+
+	// Every page on screen re-rendered for the zoom it is now shown at:
+	// sharper zoomed in, smaller zoomed back out.
+	private settleViewZoom(): void {
+		for (const pageNumber of this.renderedPages) void this.upgradeResolution(pageNumber, this.viewZoomLevel);
+		this.scheduleDetails();
+	}
+
+	// ---- Detail layer ----
+	//
+	// A page is one canvas, and a canvas has a ceiling: MAX_RENDER_SCALE, and
+	// MAX_CANVAS_PIXELS, past which Safari on an iPhone or iPad leaves it
+	// blank. A Letter page at 500% on a tablet would need well over a hundred
+	// megapixels, so zoomed in that far the page's canvas is stretched, and
+	// the text and the ink on it break up into visible pixels.
+	//
+	// The detail layer is what Obsidian's own reader (pdf.js) does about the
+	// same thing: just the part of the page on screen, drawn again at the
+	// screen's own resolution, over the stretched page. Only ever about a
+	// screenful of pixels, so it fits on every device at any zoom. Three
+	// canvases — the page, its ink, and the stroke being drawn — so that
+	// drawing stays as cheap as it is on the page's own layers: a pen moving
+	// repaints only the stroke, not every stroke on the page. The stretched
+	// ink and live layers underneath are hidden where the sharp copies are.
+
+	private scheduleDetails(): void {
+		if (this.detailHandle !== null) window.clearTimeout(this.detailHandle);
+		this.detailHandle = window.setTimeout(() => {
+			this.detailHandle = null;
+			this.updateDetails();
+		}, DETAIL_DELAY_MS);
+	}
+
+	private updateDetails(): void {
+		for (const pageNumber of this.renderedPages) {
+			if (this.detailNeeded(pageNumber)) void this.renderDetail(pageNumber);
+			else this.removeDetail(pageNumber);
+		}
+		for (const pageNumber of [...this.details.keys()]) {
+			if (!this.renderedPages.has(pageNumber)) this.removeDetail(pageNumber);
+		}
+	}
+
+	// Whether the page's canvas falls short of the screen at this zoom.
+	private detailNeeded(pageNumber: number): boolean {
+		const rendered = this.renderedScales.get(pageNumber);
+		const ideal = this.inkBaseScales.get(pageNumber) ?? this.baseScales.get(pageNumber);
+		if (!rendered || !ideal) return false;
+		return ideal * this.viewZoomLevel > rendered * DETAIL_THRESHOLD;
+	}
+
+	private async renderDetail(pageNumber: number): Promise<void> {
+		const pdf = this.pdf;
+		const placeholder = this.contentEl.querySelector<HTMLElement>(`.inkling-pdf-page-placeholder[data-page-number="${pageNumber}"]`);
+		const viewport = this.viewports.get(pageNumber);
+		if (!pdf || !placeholder || !viewport) return;
+
+		const page = placeholder.getBoundingClientRect();
+		const view = this.contentEl.getBoundingClientRect();
+		const marginX = view.width * DETAIL_MARGIN;
+		const marginY = view.height * DETAIL_MARGIN;
+		const left = Math.max(page.left, view.left - marginX);
+		const right = Math.min(page.right, view.right + marginX);
+		const top = Math.max(page.top, view.top - marginY);
+		const bottom = Math.min(page.bottom, view.bottom + marginY);
+		if (right <= left || bottom <= top || page.width === 0 || page.height === 0) {
+			this.removeDetail(pageNumber);
+			return;
+		}
+
+		// The screen's own density, unless a very large screen would take the
+		// region past what one canvas may hold.
+		const dpr = window.devicePixelRatio || 1;
+		const pixels = (right - left) * dpr * (bottom - top) * dpr;
+		const density = pixels > MAX_CANVAS_PIXELS ? dpr * Math.sqrt(MAX_CANVAS_PIXELS / pixels) : dpr;
+
+		const detail = this.details.get(pageNumber) ?? this.createDetail(pageNumber);
+		detail.task?.cancel();
+		const generation = ++this.detailGeneration;
+		detail.generation = generation;
+		const token = this.renderToken;
+
+		const canvas = createEl('canvas', { cls: 'inkling-detail-layer inkling-pdf-detail' });
+		canvas.width = Math.ceil((right - left) * density);
+		canvas.height = Math.ceil((bottom - top) * density);
+		const pageWidth = page.width * density;
+		const offsetX = (left - page.left) * density;
+		const offsetY = (top - page.top) * density;
+		try {
+			const pdfPage = await pdf.getPage(pageNumber);
+			if (detail.generation !== generation || token !== this.renderToken) return;
+			const pointWidth = viewport.width / viewport.scale;
+			const task = pdfPage.render({
+				canvas,
+				viewport: pdfPage.getViewport({ scale: pageWidth / pointWidth }),
+				// Just the region: everything else lands off the canvas.
+				transform: [1, 0, 0, 1, -offsetX, -offsetY],
+				annotationMode: AnnotationMode.ENABLE,
+			});
+			detail.task = task;
+			await task.promise;
+		} catch (error) {
+			if (!(error instanceof RenderingCancelledException)) console.error(`Inkling: failed to draw page ${pageNumber} sharp.`, error);
+			return;
+		}
+		if (detail.generation !== generation || token !== this.renderToken || this.details.get(pageNumber) !== detail) return;
+
+		// Everything below swaps in together, so the sharp page, the sharp
+		// ink and the hole cut in the stretched ink always agree.
+		detail.task = null;
+		Object.assign(detail, {
+			left: (left - page.left) / page.width,
+			top: (top - page.top) / page.height,
+			right: (right - page.left) / page.width,
+			bottom: (bottom - page.top) / page.height,
+			pageWidth,
+			offsetX,
+			offsetY,
+		});
+		const content = placeholder.querySelector<HTMLElement>('.inkling-page-content');
+		const pageCanvas = this.pageCanvases.get(pageNumber);
+		const base = content?.querySelector<HTMLCanvasElement>('.inkling-annotation-base');
+		const overlay = content?.querySelector<HTMLCanvasElement>('.inkling-annotation-overlay');
+		if (!content || !pageCanvas || !base || !overlay) return;
+
+		if (detail.pdf) detail.pdf.replaceWith(canvas);
+		else pageCanvas.after(canvas);
+		detail.pdf = canvas;
+		detail.ink ??= createEl('canvas', { cls: 'inkling-detail-layer inkling-ink-detail' });
+		if (!detail.ink.isConnected) base.after(detail.ink);
+		detail.overlay ??= createEl('canvas', { cls: 'inkling-detail-layer inkling-overlay-detail' });
+		if (!detail.overlay.isConnected) overlay.after(detail.overlay);
+		for (const layer of [detail.ink, detail.overlay]) {
+			layer.width = canvas.width;
+			layer.height = canvas.height;
+		}
+
+		const place = {
+			'--inkling-detail-left': `${detail.left * 100}%`,
+			'--inkling-detail-top': `${detail.top * 100}%`,
+			'--inkling-detail-right': `${detail.right * 100}%`,
+			'--inkling-detail-bottom': `${detail.bottom * 100}%`,
+		};
+		for (const layer of [detail.pdf, detail.ink, detail.overlay]) layer.setCssProps(place);
+		base.setCssProps(place);
+		base.addClass('has-detail-hole');
+		overlay.addClass('is-detailed');
+		this.paintDetail(pageNumber, 'ink');
+		this.paintDetail(pageNumber, 'overlay');
+	}
+
+	private createDetail(pageNumber: number): PageDetail {
+		const detail: PageDetail = {
+			left: 0,
+			top: 0,
+			right: 0,
+			bottom: 0,
+			pageWidth: 0,
+			offsetX: 0,
+			offsetY: 0,
+			pdf: null,
+			ink: null,
+			overlay: null,
+			task: null,
+			generation: 0,
+			inkFrame: null,
+			overlayFrame: null,
+		};
+		this.details.set(pageNumber, detail);
+		return detail;
+	}
+
+	private removeDetail(pageNumber: number): void {
+		const detail = this.details.get(pageNumber);
+		if (!detail) return;
+		this.details.delete(pageNumber);
+		detail.task?.cancel();
+		if (detail.inkFrame !== null) window.cancelAnimationFrame(detail.inkFrame);
+		if (detail.overlayFrame !== null) window.cancelAnimationFrame(detail.overlayFrame);
+		const content = detail.pdf?.parentElement;
+		detail.pdf?.remove();
+		detail.ink?.remove();
+		detail.overlay?.remove();
+		content?.querySelector('.inkling-annotation-base')?.removeClass('has-detail-hole');
+		content?.querySelector('.inkling-annotation-overlay')?.removeClass('is-detailed');
+	}
+
+	// The page's ink or live layer changed: the sharp copy follows, once a
+	// frame at most, however many samples a fast pen delivers in one.
+	private repaintDetail(pageNumber: number, layer: 'ink' | 'overlay'): void {
+		const detail = this.details.get(pageNumber);
+		if (!detail?.pdf) return;
+		const frame = layer === 'ink' ? 'inkFrame' : 'overlayFrame';
+		if (detail[frame] !== null) return;
+		detail[frame] = window.requestAnimationFrame(() => {
+			detail[frame] = null;
+			if (this.details.get(pageNumber) === detail) this.paintDetail(pageNumber, layer);
+		});
+	}
+
+	private paintDetail(pageNumber: number, layer: 'ink' | 'overlay'): void {
+		const detail = this.details.get(pageNumber);
+		const canvas = layer === 'ink' ? detail?.ink : detail?.overlay;
+		const viewport = this.viewports.get(pageNumber);
+		const ctx = canvas?.getContext('2d');
+		if (!detail || !canvas || !viewport || !ctx) return;
+		ctx.setTransform(1, 0, 0, 1, 0, 0);
+		ctx.clearRect(0, 0, canvas.width, canvas.height);
+		// The page's canvas space onto this region of the sharp copy. Worked
+		// out from the page's canvas as it is now rather than as it was when
+		// the region was drawn, since sharpening the page re-backs it.
+		const scale = detail.pageWidth / viewport.width;
+		ctx.setTransform(scale, 0, 0, scale, -detail.offsetX, -detail.offsetY);
+		if (layer === 'ink') this.controller.drawInkTo(pageNumber, ctx);
+		else this.controller.drawOverlayTo(pageNumber, ctx);
+	}
+
+	// ---- Infinite canvas ----
+	//
+	// A canvas grows when ink comes near one of its edges, or when the reader
+	// scrolls up against an edge with ink near it — which is how you make
+	// room before writing somewhere new. Never on its own: a canvas with no
+	// ink near an edge stays the size it is however much it is scrolled, so
+	// panning around cannot leave it ballooning with empty space.
+	//
+	// Growing never reloads the view. The file is rewritten with the new box
+	// and a fresh writer opened on it (see writeGrownBox) — the old one holds
+	// its own parsed copy of the document and verifies every save against
+	// it, so it cannot simply be told the file changed. Then the grown page
+	// is rendered out of sight and swapped in for the old one in a single
+	// frame (see showGrownPage). Writing carries on throughout.
+
+	private scheduleGrowthFromInk(): void {
+		if (this.growAfterInkHandle !== null) window.clearTimeout(this.growAfterInkHandle);
+		this.growAfterInkHandle = window.setTimeout(() => {
+			this.growAfterInkHandle = null;
+			const box = this.infiniteBox;
+			if (!box) return;
+			void this.growInfiniteCanvas(edgesNear(box, this.inkBounds(), EDGE_ZONE));
+		}, GROW_AFTER_INK_MS);
+	}
+
+	private onScrollForGrowth(): void {
+		if (!this.infiniteBox || performance.now() < this.scrollGrowthArmedAt) return;
+		this.scrollGestureStart ??= { left: this.contentEl.scrollLeft, top: this.contentEl.scrollTop };
+		if (this.growAfterScrollHandle !== null) window.clearTimeout(this.growAfterScrollHandle);
+		this.growAfterScrollHandle = window.setTimeout(() => {
+			this.growAfterScrollHandle = null;
+			const start = this.scrollGestureStart;
+			this.scrollGestureStart = null;
+			if (start) void this.growInfiniteCanvas(this.edgesScrolledInto(start));
+		}, GROW_AFTER_SCROLL_MS);
+	}
+
+	// The edges the reader has just scrolled up against: moved towards, and
+	// now on screen. Only those with ink within a step of them, so the room
+	// made is room next to something rather than room next to more room.
+	private edgesScrolledInto(start: { left: number; top: number }): Edge[] {
+		const box = this.infiniteBox;
+		const placeholder = this.contentEl.querySelector<HTMLElement>('.inkling-pdf-page-placeholder');
+		if (!box || !placeholder) return [];
+		const page = placeholder.getBoundingClientRect();
+		const view = this.contentEl.getBoundingClientRect();
+		const dx = this.contentEl.scrollLeft - start.left;
+		const dy = this.contentEl.scrollTop - start.top;
+
+		const reached: Edge[] = [];
+		if (dx < 0 && page.left >= view.left - 1) reached.push('left');
+		if (dx > 0 && page.right <= view.right + 1) reached.push('right');
+		if (dy < 0 && page.top >= view.top - 1) reached.push('top');
+		if (dy > 0 && page.bottom <= view.bottom + 1) reached.push('bottom');
+		if (reached.length === 0) return [];
+
+		const ink = this.inkBounds();
+		const near = [
+			...edgesNear(box, ink, GROW_STEP_X).filter((edge) => edge === 'left' || edge === 'right'),
+			...edgesNear(box, ink, GROW_STEP_Y).filter((edge) => edge === 'top' || edge === 'bottom'),
+		];
+		return reached.filter((edge) => near.includes(edge));
+	}
+
+	// Everything on the canvas, as one box in PDF space.
+	private inkBounds(): PdfBox | null {
+		const viewport = this.viewports.get(1);
+		if (!viewport) return null;
+		const points: Point[] = [];
+		for (const annotation of this.controller.getPageAnnotations(1).map((a) => toPdfSpace(a, viewport))) {
+			// The pen's half-width beyond its centreline, so a thick stroke
+			// along an edge counts as reaching it.
+			const reach = annotation.width / 2;
+			const centres =
+				annotation.kind === 'stroke'
+					? annotation.points
+					: annotation.kind === 'note'
+						? [annotation.at]
+						: [annotation.start, annotation.end];
+			for (const { x, y } of centres) {
+				points.push({ x: x - reach, y: y - reach }, { x: x + reach, y: y + reach });
+			}
+		}
+		return boundsOf(points);
+	}
+
+	private cancelGrowthChecks(): void {
+		if (this.growAfterInkHandle !== null) window.clearTimeout(this.growAfterInkHandle);
+		if (this.growAfterScrollHandle !== null) window.clearTimeout(this.growAfterScrollHandle);
+		this.growAfterInkHandle = null;
+		this.growAfterScrollHandle = null;
+		this.scrollGestureStart = null;
+	}
+
+	private async growInfiniteCanvas(edges: Edge[]): Promise<void> {
+		const file = this.currentFile;
+		const box = this.infiniteBox;
+		if (edges.length === 0 || !file || !box || !this.writer || !this.pdf) return;
+		if (this.growing || this.addingPage || this.controller.isReadOnly()) return;
+
+		const growth = growBox(box, edges);
+		if (!growth) {
+			if (!this.reportedCanvasLimit) {
+				this.reportedCanvasLimit = true;
+				new Notice('Inkling: this canvas has reached the largest size a PDF page can be.');
+			}
+			return;
+		}
+
+		this.growing = true;
+		const token = this.renderToken;
+		try {
+			const opened = await this.writeGrownBox(file, growth.box, token);
+			if (!opened || token !== this.renderToken) return;
+			await this.showGrownPage(opened, growth, token);
+		} catch (error) {
+			console.error('Inkling: failed to grow the canvas.', error);
+			new Notice('Inkling: could not make this canvas larger.');
+		} finally {
+			this.growing = false;
+		}
+		// Ink drawn while the page was growing can have reached the new edge
+		// already.
+		if (token === this.renderToken) this.scheduleGrowthFromInk();
+	}
+
+	// The file half of a growth: the new box written into the PDF, and a
+	// writer opened on the result in place of the old one, whose parsed copy
+	// of the document no longer matches what is on disk.
+	//
+	// Takes the save slot for as long as that lasts. A save already in flight
+	// finishes first, and one asked for meanwhile waits behind this — so no
+	// save is ever built against the document as it was before the box
+	// changed, and none is lost either: ink drawn during it is still dirty,
+	// and goes to the new writer.
+	//
+	// Nothing on screen changes here. Ink is converted to PDF space through
+	// the page's viewport when it is saved, and PDF space is the one thing a
+	// growth leaves alone, so the old viewport keeps saving correctly until
+	// the grown page is shown.
+	private async writeGrownBox(file: TFile, box: PdfBox, token: number): Promise<OpenResult | null> {
+		while (this.saving) await this.saving.catch(() => undefined);
+		if (token !== this.renderToken) return null;
+
+		let release: () => void = () => undefined;
+		this.saving = new Promise<void>((resolve) => (release = resolve));
+		const slot = this.saving;
+		try {
+			// Another device's change first: a growth written over it would
+			// keep its ink in the file but never show it here, and the next
+			// save of this page would then drop it.
+			if (await this.changedOnDisk(file)) {
+				void this.pullRemote(file);
+				return null;
+			}
+			const original = await this.app.vault.readBinary(file);
+			const pdfDoc = await PDFDocument.load(original);
+			setInfiniteCanvasBox(pdfDoc.getPage(0), box);
+			const grown = toArrayBuffer(await pdfDoc.save());
+			await this.ownWrite(file, () => writeBinarySafely(this.app.vault, file, grown));
+
+			const writer = new AnnotationWriterClient();
+			let opened: OpenResult;
+			try {
+				// A copy: open() hands its buffer to the worker.
+				opened = await writer.open(grown.slice(0));
+			} catch (error) {
+				writer.terminate();
+				// The old writer is still the one in charge, and it believes
+				// the file is what it was. Making that true again is what keeps
+				// its next save from undoing the growth or landing at an offset
+				// that is no longer the end of the file.
+				await this.ownWrite(file, () => writeBinarySafely(this.app.vault, file, original));
+				throw error;
+			}
+			if (token !== this.renderToken) {
+				writer.terminate();
+				return null;
+			}
+
+			this.writer?.terminate();
+			this.writer = writer;
+			this.pageIds = opened.pageIds ?? this.pageIds;
+			this.infiniteBox = box;
+			this.maxWriteInterval = maxWriteIntervalMs(
+				this.getSettings().saveCadence === 'frequent' ? 0 : grown.byteLength,
+				opened.incremental && canAppendBinary(this.app.vault),
+			);
+			return opened;
+		} finally {
+			release();
+			if (this.saving === slot) this.saving = null;
+		}
+	}
+
+	// The screen half: the grown page rendered out of sight, then swapped in
+	// for the old one in a single frame — canvas, annotation layers and
+	// scroll position together — so the page simply has more room around it
+	// and nothing visibly reloads. The stroke being drawn finishes first.
+	private async showGrownPage(opened: OpenResult, growth: Growth, token: number): Promise<void> {
+		const pdf = await withTimeout(
+			getDocument({ data: opened.displayBytes, isEvalSupported: false }).promise,
+			PDF_LOAD_TIMEOUT_MS,
+			'Inkling: timed out opening this PDF.',
+		);
+		let swapped = false;
+		try {
+			const page = await pdf.getPage(1);
+			let refusal: string | null = opened.risky.length > 0 ? `it contains ${opened.risky.join(' and ')}` : null;
+			refusal ??= compareProfiles(opened.profile, await profileFromPdfJs(pdf));
+			if (token !== this.renderToken) return;
+
+			const points = page.getViewport({ scale: 1 });
+			const layoutScale = this.layoutScaleFor(1, INFINITE_BASE_WIDTH);
+			const layoutViewport = page.getViewport({ scale: layoutScale });
+			const ideal = baseRenderScale(layoutViewport.width, points.width, window.devicePixelRatio || 1);
+			const base = capToPixelBudget(ideal, points.width, points.height);
+			const scale = capToPixelBudget(zoomedRenderScale(base, this.viewZoomLevel), points.width, points.height);
+			const viewport = page.getViewport({ scale });
+
+			const canvas = createEl('canvas', { cls: 'inkling-pdf-page' });
+			canvas.width = viewport.width;
+			canvas.height = viewport.height;
+			await page.render({ canvas, viewport, annotationMode: AnnotationMode.ENABLE }).promise;
+
+			await this.untilPageIsIdle(1, token);
+			if (token !== this.renderToken) return;
+
+			const placeholder = this.contentEl.querySelector<HTMLElement>('.inkling-pdf-page-placeholder[data-page-number="1"]');
+			const oldCanvas = this.pageCanvases.get(1);
+			const oldViewport = this.viewports.get(1);
+			if (!placeholder || !oldCanvas || !oldViewport || !oldCanvas.parentElement) {
+				throw new Error('the page is not on screen to be swapped');
+			}
+
+			// From here to the end of the block is one synchronous run, so the
+			// browser paints either the old page or the new one, never a mix.
+			this.closeNoteEditor();
+			// Placed by fractions of the old page, which the new one is not.
+			this.removeDetail(1);
+			const reproject = (annotation: Annotation) => toCanvasSpace(toPdfSpace(annotation, oldViewport), viewport);
+			const annotations = this.controller.getPageAnnotations(1).map(reproject);
+			this.history.restore(this.history.snapshot(), (entry) =>
+				entry.pageNumber === 1 ? { ...entry, before: entry.before.map(reproject), after: entry.after.map(reproject) } : entry,
+			);
+
+			sizePlaceholder(placeholder, layoutViewport.width, layoutViewport.height);
+			oldCanvas.replaceWith(canvas);
+			this.controller.resizePage(1, viewport.width, viewport.height, annotations);
+			this.viewports.set(1, viewport);
+			this.pageCanvases.set(1, canvas);
+			this.renderedScales.set(1, scale);
+			this.baseScales.set(1, base);
+			this.inkBaseScales.set(1, ideal);
+			// Growing left or up puts new canvas in front of what was on
+			// screen; scrolling on by the same amount keeps it there. Not the
+			// reader moving towards an edge, so not a reason to grow again.
+			this.scrollGrowthArmedAt = performance.now() + SCROLL_GROWTH_SETTLE_MS;
+			this.contentEl.scrollLeft += growth.addedLeft * layoutScale * this.viewZoomLevel;
+			this.contentEl.scrollTop += growth.addedTop * layoutScale * this.viewZoomLevel;
+
+			const previous = this.pdf;
+			this.pdf = pdf;
+			swapped = true;
+			void previous?.destroy();
+			this.textLines.delete(1);
+			computeTextLines(page, viewport)
+				.then((lines) => {
+					if (token === this.renderToken) this.textLines.set(1, lines);
+				})
+				.catch((error: unknown) => console.error('Inkling: failed to read text content for the canvas.', error));
+
+			if (refusal) {
+				this.controller.setReadOnly(true);
+				this.showReadOnlyBanner(refusal);
+			}
+			this.controller.refreshUi();
+			this.scheduleDetails();
+			const grownFile = this.currentFile;
+			if (grownFile) void refreshCoreReaders(this.app, grownFile);
+		} finally {
+			if (!swapped) void pdf.destroy();
+		}
+	}
+
+	// Resolves once nothing is happening on the page that swapping it would
+	// break: no stroke or drag in progress, no pinch-zoom (whose transform is
+	// in the old page's pixels), and no sharpening render still writing into
+	// the old canvas. Or once the view has moved on to something else.
+	private async untilPageIsIdle(pageNumber: number, token: number): Promise<void> {
+		while (
+			token === this.renderToken &&
+			(this.controller.isGestureActive() || this.controller.getPageZoom(pageNumber) !== 1 || this.upgradingPages.has(pageNumber))
+		) {
+			await new Promise((resolve) => window.setTimeout(resolve, GROW_IDLE_POLL_MS));
+		}
+	}
+
+	// ---- Another device ----
+	//
+	// Two devices with the same PDF open, both writing on it, each saving to
+	// the file and each file arriving at the other by sync. This view used to
+	// read the file once, when it opened, and then write over whatever was
+	// there — so whichever device saved last silently undid the other's ink.
+	//
+	// Now a change on disk that this view did not make is read and merged
+	// into what is on screen as it lands, stroke by stroke, the same three-way
+	// way an ink block merges (see mergeAnnotations): the other device's new
+	// strokes appear, ours that are not saved yet stay, and a stroke erased
+	// on either side is gone. Then this view writes on from the merged file,
+	// with a writer opened on it, so its next save is built on the other
+	// device's rather than over it.
+	//
+	// It is as live as the sync that carries the file: there is no
+	// connection between the devices but the file, which is all a plugin
+	// that makes no network calls has.
+
+	private async ownWrite(file: TFile, write: () => Promise<void>): Promise<void> {
+		this.ownWrites++;
+		try {
+			await write();
+		} finally {
+			this.ownWrites--;
+			await this.rememberDisk(file);
+		}
+	}
+
+	private async rememberDisk(file: TFile): Promise<void> {
+		try {
+			const stat = await this.app.vault.adapter.stat(file.path);
+			if (stat) this.knownDisk = { path: file.path, size: stat.size, mtime: stat.mtime };
+		} catch {
+			// Unknown, then: the next change is checked against the file itself.
+		}
+	}
+
+	// Whether the file on disk is no longer the one this view last wrote or
+	// read. Unknown — nothing remembered, or a file since renamed — is not a
+	// change.
+	private async changedOnDisk(file: TFile): Promise<boolean> {
+		const known = this.knownDisk;
+		if (!known || known.path !== file.path) return false;
+		try {
+			const stat = await this.app.vault.adapter.stat(file.path);
+			return !!stat && (stat.size !== known.size || stat.mtime !== known.mtime);
+		} catch {
+			return false;
+		}
+	}
+
+	private isOwnVersion(file: TFile): boolean {
+		const known = this.knownDisk;
+		return !!known && known.path === file.path && known.size === file.stat.size && known.mtime === file.stat.mtime;
+	}
+
+	private onFileChanged(file: TFile): void {
+		if (this.ownWrites > 0 || this.isOwnVersion(file)) return;
+		if (this.remoteHandle !== null) window.clearTimeout(this.remoteHandle);
+		this.remoteHandle = window.setTimeout(() => {
+			this.remoteHandle = null;
+			void this.pullRemote(file);
+		}, REMOTE_SETTLE_MS);
+	}
+
+	// Reads another device's save and merges it into this view. One at a
+	// time: asked again while one is under way, the one under way answers.
+	// `force` is a rebuild's own asking (see rebuild), which may not wait for
+	// the rebuild to be over.
+	private pullRemote(file: TFile, force = false): Promise<void> {
+		if (this.pulling) return this.pulling;
+		let run: Promise<void> | null = null;
+		run = (async () => {
+			const reload = await this.takeInRemote(file, force);
+			// Cleared before the reload, which flushes, and whose flush may
+			// itself need to take in a change: it must not wait on this.
+			if (this.pulling === run) this.pulling = null;
+			if (reload) await this.onLoadFile(file);
+		})().finally(() => {
+			if (this.pulling === run) this.pulling = null;
+		});
+		this.pulling = run;
+		return run;
+	}
+
+	// Holds the save slot throughout, as a growth does (see writeGrownBox):
+	// no save of ours may be built against the file as it was before it
+	// changed. True when the view has to reload from the merged file.
+	//
+	// Pages are matched by identity, not number (see pageIdsOf). While both
+	// files have the same pages in the same order, theirs are merged into
+	// what is on screen as they land. When pages were added or deleted on
+	// the other device, a page's number here is not its number there, and
+	// neither is its size or the viewport that turns ink into PDF space: the
+	// merged ink is then written straight into their file, page by page where
+	// each page now is, and the view reloads from it. Before, ink was merged
+	// by page number — onto whichever page now had that number.
+	private async takeInRemote(file: TFile, force: boolean): Promise<boolean> {
+		// A rebuild or a growth under way reloads or swaps the page itself,
+		// and between its steps the view's pages, viewports and writer do not
+		// all describe the same file. Asked again once it is done.
+		if (!force && (this.addingPage || this.growing)) {
+			this.remoteHandle ??= window.setTimeout(() => {
+				this.remoteHandle = null;
+				void this.pullRemote(file);
+			}, REMOTE_SETTLE_MS);
+			return false;
+		}
+		const token = this.renderToken;
+		while (this.saving) await this.saving.catch(() => undefined);
+		if (token !== this.renderToken || file !== this.currentFile || !this.pdf) return false;
+		if (!force && (this.addingPage || this.growing)) {
+			this.onFileChanged(file);
+			return false;
+		}
+
+		let release: () => void = () => undefined;
+		this.saving = new Promise<void>((resolve) => (release = resolve));
+		const slot = this.saving;
+		let reload = false;
+		let pausedInput = false;
+		const unsaved: number[] = [];
+		try {
+			// Looked at again now that nothing of ours is writing: the change
+			// may have been our own after all, reported late.
+			const stat = await this.app.vault.adapter.stat(file.path);
+			const known = this.knownDisk;
+			if (stat && known && known.path === file.path && known.size === stat.size && known.mtime === stat.mtime) return false;
+
+			const bytes = await this.app.vault.readBinary(file);
+			const writer = new AnnotationWriterClient();
+			let opened: OpenResult;
+			try {
+				opened = await writer.open(bytes.slice(0));
+			} catch (error) {
+				writer.terminate();
+				// Not readable as it is — most likely a sync still writing it.
+				// The next change will bring the rest.
+				console.warn('Inkling: could not read this PDF as it arrived from another device.', error);
+				return false;
+			}
+			const pdf = this.pdf;
+			if (token !== this.renderToken || !pdf) {
+				writer.terminate();
+				return false;
+			}
+			// A page more or fewer, or a page another size — a growth on an
+			// infinite canvas, or pages inserted — is more than annotations
+			// can say, and takes a reload once the ink is merged and saved.
+			const resized = compareProfiles(opened.profile, await profileFromPdfJs(pdf)) !== null;
+			// Checked again after every wait: a writer opened on a file the
+			// view has since moved on from must never become the one it saves
+			// with.
+			if (token !== this.renderToken || pdf !== this.pdf) {
+				writer.terminate();
+				return false;
+			}
+
+			const ourIds = this.pageIds;
+			const theirIds = opened.pageIds ?? [];
+			const identified = ourIds.length > 0 && theirIds.length > 0;
+			const moved = identified && (ourIds.length !== theirIds.length || ourIds.some((id, index) => id !== theirIds[index]));
+			const theirPageFor = (pageNumber: number): number | null => {
+				if (!identified) return pageNumber;
+				const index = theirIds.indexOf(ourIds[pageNumber - 1] ?? '');
+				return index < 0 ? null : index + 1;
+			};
+
+			// Nothing drawn here from now until the reload may be lost to it.
+			if (moved && !this.controller.isReadOnly()) {
+				this.controller.setReadOnly(true);
+				pausedInput = true;
+			}
+
+			const writes: { pageNumber: number; annotations: Annotation[] }[] = [];
+			const gone: number[] = [];
+			const pages = new Set<number>([...this.savedAnnotations.keys(), ...this.seededPages, ...this.dirtyPages]);
+			if (!moved) for (const theirPage of opened.savedAnnotations.keys()) pages.add(theirPage);
+			for (const pageNumber of pages) {
+				const base = this.savedAnnotations.get(pageNumber) ?? [];
+				const viewport = this.viewports.get(pageNumber);
+				const live = viewport && this.seededPages.has(pageNumber);
+				const ours = live ? this.controller.getPageAnnotations(pageNumber).map((a) => toPdfSpace(a, viewport)) : base;
+				const theirPage = theirPageFor(pageNumber);
+				if (theirPage === null) {
+					// Deleted there. Whatever was saved on it went with it, as
+					// the other device meant; what was drawn here since cannot
+					// go anywhere, and is said so rather than lost quietly.
+					if (ours.some((a) => !base.some((b) => sameInFile(a, b)))) gone.push(pageNumber);
+					continue;
+				}
+				const theirs = opened.savedAnnotations.get(theirPage) ?? [];
+				const merged = mergeAnnotations(base, ours, theirs, sameInFile);
+				if (moved) {
+					if (!sameSet(merged, theirs)) writes.push({ pageNumber: theirPage, annotations: merged });
+					continue;
+				}
+				if (live && !sameSet(merged, ours)) {
+					this.controller.replacePage(pageNumber, merged.map((a) => toCanvasSpace(a, viewport)));
+				}
+				if (!sameSet(merged, theirs)) unsaved.push(pageNumber);
+			}
+
+			if (moved && writes.length > 0) {
+				// Saved here and now, to their file, where each page is in it.
+				try {
+					let outcome = await writer.write(writes);
+					if (outcome.mode === 'append') {
+						const { appendix, baseLength } = outcome;
+						try {
+							await this.ownWrite(file, () => appendBinarySafely(this.app.vault, file, appendix, baseLength));
+						} catch (error) {
+							// As a save does (see saveDirtyPages): the fast path given
+							// up, and the same ink written whole instead.
+							await writer.abandon(String(error));
+							outcome = await writer.write(writes);
+							if (outcome.mode === 'append') throw error;
+						}
+					}
+					if (outcome.mode === 'full') {
+						const whole = outcome.bytes;
+						await this.ownWrite(file, () => writeBinarySafely(this.app.vault, file, whole));
+					}
+					await writer.commit();
+				} catch (error) {
+					// Theirs is on disk and ours still on screen and dirty: the
+					// next save finds the file changed and brings this round
+					// again, rather than either side being lost.
+					writer.terminate();
+					console.error('Inkling: could not save ink into a change from another device.', error);
+					return false;
+				}
+			} else {
+				await this.rememberDisk(file);
+			}
+
+			if (gone.length > 0) {
+				const list = gone.join(', ');
+				new Notice(`Inkling: ${gone.length === 1 ? `page ${list} was` : `pages ${list} were`} deleted on another device, with what you had just drawn on ${gone.length === 1 ? 'it' : 'them'}.`);
+			}
+
+			this.savedAnnotations = opened.savedAnnotations;
+			this.pageIds = theirIds;
+			this.writer?.terminate();
+			this.writer = writer;
+			this.maxWriteInterval = maxWriteIntervalMs(
+				this.getSettings().saveCadence === 'frequent' ? 0 : bytes.byteLength,
+				opened.incremental && canAppendBinary(this.app.vault),
+			);
+			this.sharedWithAnotherDevice = true;
+
+			if (moved) {
+				// All of ours is in their file now. Nothing may be saved again by
+				// this view's page numbers, which no longer mean those pages.
+				this.dirtyPages.clear();
+				if (this.writeDebounceHandle !== null) window.clearTimeout(this.writeDebounceHandle);
+				if (this.maxWaitHandle !== null) window.clearTimeout(this.maxWaitHandle);
+				this.writeDebounceHandle = null;
+				this.maxWaitHandle = null;
+				pausedInput = false;
+				reload = true;
+			} else {
+				reload = resized;
+			}
+		} catch (error) {
+			console.error('Inkling: failed to take in a change from another device.', error);
+		} finally {
+			release();
+			if (this.saving === slot) this.saving = null;
+			if (pausedInput) this.controller.setReadOnly(false);
+		}
+
+		// Ours that their file does not have yet, on its way to it.
+		for (const pageNumber of unsaved) this.markPageDirty(pageNumber);
+		if (reload && token === this.renderToken) {
+			await this.flushAnnotationsIfDirty(file);
+			return true;
+		}
+		return false;
+	}
+
+	// A finger held on a picture picks it up, as a pen held on one does (see
+	// AnnotationController.pickUpPictureAt). Found from the client point: the
+	// page under it, and the point in that page's canvas.
+	private pickUpPictureAt(at: Point): boolean {
+		const found = this.pagePointAt(at);
+		return found ? this.controller.pickUpPictureAt(found.pageNumber, found.point) : false;
+	}
+
+	// A finger's tap anywhere in the view: on a page, the page has it (see
+	// AnnotationController.touchTap); between pages or beside them, it only
+	// lets go of a selection.
+	private tapAt(at: Point): void {
+		const found = this.pagePointAt(at);
+		if (found) this.controller.touchTap(found.pageNumber, found.point);
+		else this.controller.clearSelection();
+	}
+
+	// The page under a client point, and the point in that page's canvas.
+	private pagePointAt(at: Point): { pageNumber: number; point: Point } | null {
+		for (const placeholder of Array.from(this.contentEl.querySelectorAll<HTMLElement>('.inkling-pdf-page-placeholder'))) {
+			const overlay = placeholder.querySelector<HTMLCanvasElement>('.inkling-annotation-overlay');
+			if (!overlay) continue;
+			const rect = overlay.getBoundingClientRect();
+			if (at.x < rect.left || at.x > rect.right || at.y < rect.top || at.y > rect.bottom || rect.width === 0) continue;
+			const pageNumber = Number(placeholder.dataset[PAGE_NUMBER_ATTR]);
+			return { pageNumber, point: { x: ((at.x - rect.left) * overlay.width) / rect.width, y: ((at.y - rect.top) * overlay.height) / rect.height } };
+		}
+		return null;
+	}
+
+	// ---- Importing ----
+	//
+	// The toolbar's import button: a PDF's pages inserted after the page on
+	// screen, or a picture placed on it — from the vault or from the device.
+
+	// Blank, lined or dot grid: for the page in view, or for every page —
+	// and then for the pages added after, too.
+	private showBackgroundMenu(anchor: HTMLElement): void {
+		const menu = new Menu();
+		const pageNumber = this.currentPageNumber;
+		const targets: Array<[number | 'all', string]> = this.infiniteBox
+			? [['all', 'Background']]
+			: [
+					[pageNumber, `This page (${pageNumber})`],
+					['all', 'All pages'],
+				];
+		targets.forEach(([target, label], index) => {
+			if (index > 0) menu.addSeparator();
+			menu.addItem((item) => item.setTitle(label).setIsLabel(true));
+			for (const style of TEMPLATE_STYLES) {
+				menu.addItem((item) =>
+					item
+						.setTitle(TEMPLATE_STYLE_LABELS[style])
+						.setIcon(BACKGROUND_ICONS[style])
+						.onClick(() => void this.changeBackground(target, style)),
+				);
+			}
+		});
+		const rect = anchor.getBoundingClientRect();
+		menu.showAtPosition({ x: rect.left, y: rect.bottom + 4 });
+	}
+
+	private async changeBackground(target: number | 'all', style: TemplateStyle): Promise<void> {
+		const pageNumber = this.currentPageNumber;
+		await this.rebuild('background', 'could not change the background.', async (bytes) => {
+			const result = await setPageBackground(bytes, target, style);
+			if (result.kind === 'refused') {
+				new Notice(`Inkling: the background was not changed — ${result.reason}.`);
+				return null;
+			}
+			return { bytes: toArrayBuffer(result.bytes), scrollTo: pageNumber };
+		});
+	}
+
+	private showImportMenu(anchor: HTMLElement): void {
+		const menu = new Menu();
+		// An infinite canvas is one page by definition; pages inserted into
+		// it would end it being one.
+		if (!this.infiniteBox) {
+			menu.addItem((item) =>
+				item
+					.setTitle('PDF pages from the vault')
+					.setIcon('file-text')
+					.onClick(() =>
+						chooseVaultFile(this.app, ['pdf'], 'Insert the pages of which PDF?', (file) => {
+							void this.app.vault.readBinary(file).then((bytes) => this.insertPdfPages(bytes, file.basename));
+						}),
+					),
+			);
+			menu.addItem((item) =>
+				item
+					.setTitle('PDF pages from this device')
+					.setIcon('file-up')
+					.onClick(() => {
+						void chooseDeviceFile(anchor.ownerDocument, '.pdf,application/pdf').then(async (file) => {
+							if (file) await this.insertPdfPages(await file.arrayBuffer(), file.name);
+						});
+					}),
+			);
+			menu.addSeparator();
+		}
+		menu.addItem((item) =>
+			item
+				.setTitle('Picture from the vault')
+				.setIcon('image')
+				.onClick(() =>
+					chooseVaultFile(this.app, PICTURE_EXTENSIONS, 'Place which picture?', (file) => {
+						void this.app.vault.readBinary(file).then((bytes) => this.insertPicture(new Blob([bytes]), file.name));
+					}),
+				),
+		);
+		menu.addItem((item) =>
+			item
+				.setTitle('Picture from this device')
+				.setIcon('camera')
+				.onClick(() => {
+					void chooseDeviceFile(anchor.ownerDocument, 'image/*').then(async (file) => {
+						if (file) await this.insertPicture(file, file.name);
+					});
+				}),
+		);
+		const rect = anchor.getBoundingClientRect();
+		menu.showAtPosition({ x: rect.left, y: rect.bottom + 4 });
+	}
+
+	// Every page of another PDF, after the page on screen. Done the way "Add
+	// page" adds one: what is unsaved is saved first, the file is rewritten
+	// with pdf-lib, and the view reloads from it.
+	private async insertPdfPages(bytes: ArrayBuffer, name: string): Promise<void> {
+		// Most often failing for a PDF with a password on it, which pdf-lib
+		// cannot copy pages out of.
+		await this.rebuild('insert-pages', `could not insert the pages of ${name}. If it is password-protected, remove the password first.`, async (current) => {
+			const source = await PDFDocument.load(bytes);
+			const target = await PDFDocument.load(current);
+			const insertAt = Math.min(this.currentPageNumber, target.getPageCount());
+			const pages = await target.copyPages(source, source.getPageIndices());
+			pages.forEach((page, index) => target.insertPage(insertAt + index, page));
+			return {
+				bytes: toArrayBuffer(await target.save()),
+				scrollTo: insertAt + 1,
+				notice: `Inkling: inserted ${pages.length} ${pages.length === 1 ? 'page' : 'pages'} from ${name}.`,
+			};
+		});
+	}
+
+	// A picture onto the page on screen, in the middle of the part of it
+	// that shows, selected so it can be moved and sized into place.
+	private async insertPicture(blob: Blob, name: string): Promise<void> {
+		if (this.controller.isReadOnly()) return;
+		const pageNumber = this.currentPageNumber;
+		const viewport = this.viewports.get(pageNumber);
+		const placeholder = this.contentEl.querySelector<HTMLElement>(`.inkling-pdf-page-placeholder[data-page-number="${pageNumber}"]`);
+		if (!viewport || !placeholder) return;
+
+		let picture;
+		try {
+			picture = await preparePicture(blob, this.contentEl.ownerDocument);
+		} catch (error) {
+			console.error('Inkling: failed to read a picture.', error);
+			new Notice(`Inkling: could not read ${name} as a picture on this device.`);
+			return;
+		}
+		// The page may have changed while the picture was decoding.
+		if (this.viewports.get(pageNumber) !== viewport) return;
+
+		const page = placeholder.getBoundingClientRect();
+		const view = this.contentEl.getBoundingClientRect();
+		const scale = page.width > 0 ? viewport.width / page.width : 1;
+		const centre = {
+			x: ((Math.max(page.left, view.left) + Math.min(page.right, view.right)) / 2 - page.left) * scale,
+			y: ((Math.max(page.top, view.top) + Math.min(page.bottom, view.bottom)) / 2 - page.top) * scale,
+		};
+		const box = placePicture({ minX: 0, minY: 0, maxX: viewport.width, maxY: viewport.height }, picture, centre);
+		this.controller.place(pageNumber, {
+			id: createId(),
+			kind: 'image',
+			color: '#000000',
+			width: 1,
+			start: { x: box.minX, y: box.minY },
+			end: { x: box.maxX, y: box.maxY },
+			picture,
+		});
 	}
 
 	// ---- Navigation panel (outline + find) ----
@@ -1437,12 +2804,28 @@ export class PdfAnnotateView extends FileView {
 	// Built once per file load, alongside the toolbar, and hidden until
 	// asked for — so a reader who never opens it sees exactly the layout
 	// they saw before this existed.
+	// A card hanging from the bottom of the tool strip, over the pages
+	// rather than between the strip and them: it stays where it is while the
+	// pages scroll under it, and opening it no longer pushes the page being
+	// read down the screen.
 	private buildNavigationPanel(): void {
-		const panel = this.contentEl.createDiv({ cls: 'inkling-nav-panel' });
+		const host = this.contentEl.querySelector<HTMLElement>('.inkling-toolbar') ?? this.contentEl;
+		const panel = host.createDiv({ cls: 'inkling-nav-panel' });
 		panel.hidden = true;
+		panel.setAttribute('role', 'dialog');
+		panel.setAttribute('aria-label', 'Outline and find');
 		this.navPanel = panel;
 
-		const findRow = panel.createDiv({ cls: 'inkling-nav-find' });
+		const header = panel.createDiv({ cls: 'inkling-nav-header' });
+		header.createDiv({ cls: 'inkling-nav-title', text: 'Outline and find' });
+		const close = header.createEl('button', { cls: 'clickable-icon inkling-nav-close' });
+		close.type = 'button';
+		setIcon(close, 'x');
+		setTooltip(close, 'Close');
+		close.addEventListener('click', () => this.toggleNavigationPanel(false));
+
+		// Obsidian's own search field, clear button and all.
+		const findRow = panel.createDiv({ cls: 'search-input-container inkling-nav-find' });
 		const input = findRow.createEl('input', { cls: 'inkling-nav-find-input' });
 		input.type = 'search';
 		input.placeholder = 'Find in document';
@@ -1450,20 +2833,60 @@ export class PdfAnnotateView extends FileView {
 		const status = panel.createDiv({ cls: 'inkling-nav-status' });
 		const results = panel.createDiv({ cls: 'inkling-nav-results' });
 
-		input.addEventListener('keydown', (event: KeyboardEvent) => {
-			if (event.key !== 'Enter') return;
-			event.preventDefault();
+		// Searches as it is typed, once typing pauses, and at once on Enter.
+		let typing: number | null = null;
+		const search = () => {
+			if (typing !== null) window.clearTimeout(typing);
+			typing = null;
 			void this.runFind(input.value, status, results);
+		};
+		input.addEventListener('input', () => {
+			if (typing !== null) window.clearTimeout(typing);
+			typing = window.setTimeout(search, FIND_AS_YOU_TYPE_MS);
+		});
+		panel.addEventListener('keydown', (event: KeyboardEvent) => {
+			// Kept in here: the view's own keys are tool shortcuts.
+			event.stopPropagation();
+			if (event.key === 'Escape') {
+				event.preventDefault();
+				this.toggleNavigationPanel(false);
+			} else if (event.key === 'Enter' && event.target === input) {
+				event.preventDefault();
+				search();
+			}
 		});
 
 		this.navOutline = panel.createDiv({ cls: 'inkling-nav-outline' });
 	}
 
-	private toggleNavigationPanel(): void {
+	private toggleNavigationPanel(open?: boolean): void {
 		const panel = this.navPanel;
 		if (!panel) return;
-		panel.hidden = !panel.hidden;
-		if (!panel.hidden) panel.querySelector<HTMLInputElement>('.inkling-nav-find-input')?.focus();
+		panel.hidden = !(open ?? panel.hidden);
+		if (!panel.hidden) {
+			this.markCurrentChapter();
+			panel.querySelector<HTMLInputElement>('.inkling-nav-find-input')?.focus();
+		}
+	}
+
+	// Goes to a page from the panel. On a phone the panel covers most of
+	// what it would show, so it gets out of the way.
+	private goFromPanel(pageNumber: number): void {
+		this.scrollToPage(pageNumber);
+		if (this.contentEl.ownerDocument.body.classList.contains('is-phone')) this.toggleNavigationPanel(false);
+	}
+
+	// The outline entry for the part of the document on screen: the last one
+	// that starts at or before the current page.
+	private markCurrentChapter(): void {
+		const outline = this.navOutline;
+		if (!outline || this.navPanel?.hidden) return;
+		let current: HTMLElement | null = null;
+		for (const entry of Array.from(outline.querySelectorAll<HTMLElement>('.inkling-nav-entry'))) {
+			entry.removeClass('is-current');
+			if (Number(entry.dataset.page) <= this.currentPageNumber) current = entry;
+		}
+		current?.addClass('is-current');
 	}
 
 	// pdf.js states a destination either as an explicit array or as a name
@@ -1502,11 +2925,15 @@ export class PdfAnnotateView extends FileView {
 		for (const entry of entries) {
 			const pageNumber = entry.pageNumber;
 			if (pageNumber === null) continue;
-			const row = host.createEl('button', { cls: 'inkling-nav-entry', text: entry.title });
+			const row = host.createEl('button', { cls: 'inkling-nav-entry' });
 			row.type = 'button';
+			row.dataset.page = String(pageNumber);
 			row.setCssProps({ '--inkling-nav-depth': String(entry.depth) });
-			row.addEventListener('click', () => this.scrollToPage(pageNumber));
+			row.createSpan({ cls: 'inkling-nav-entry-title', text: entry.title });
+			row.createSpan({ cls: 'inkling-nav-entry-page', text: String(pageNumber) });
+			row.addEventListener('click', () => this.goFromPanel(pageNumber));
 		}
+		this.markCurrentChapter();
 	}
 
 	// Walks pages in order from the one being read, so the first result is
@@ -1546,12 +2973,11 @@ export class PdfAnnotateView extends FileView {
 			const matches = findMatches(text, needle);
 			if (matches > 0) {
 				found += matches;
-				const row = results.createEl('button', {
-					cls: 'inkling-nav-entry',
-					text: `Page ${pageNumber} — ${matches} ${matches === 1 ? 'match' : 'matches'}`,
-				});
+				const row = results.createEl('button', { cls: 'inkling-nav-entry' });
 				row.type = 'button';
-				row.addEventListener('click', () => this.scrollToPage(pageNumber));
+				row.createSpan({ cls: 'inkling-nav-entry-title', text: `Page ${pageNumber}` });
+				row.createSpan({ cls: 'inkling-nav-entry-page', text: `${matches} ${matches === 1 ? 'match' : 'matches'}` });
+				row.addEventListener('click', () => this.goFromPanel(pageNumber));
 			}
 			status.setText(`Searched ${offset + 1} of ${pdf.numPages} pages, ${found} found`);
 		}
@@ -1586,12 +3012,29 @@ export class PdfAnnotateView extends FileView {
 			const canvas = this.pageCanvases.get(pageNumber);
 			const scale = canvas && canvas.width > 0 ? placeholder.clientWidth / canvas.width : 1;
 
+			const header = popover.createDiv({ cls: 'inkling-note-header' });
+			header.createDiv({ cls: 'inkling-note-title', text: existing ? 'Edit note' : 'New note' });
+
 			const field = popover.createEl('textarea', { cls: 'inkling-note-text' });
 			field.value = existing;
-			field.placeholder = 'Note';
+			field.placeholder = 'Write a note…';
+			field.rows = 3;
 			field.setAttribute('aria-label', 'Note text');
+			// Grows with what is written, up to a limit past which it scrolls,
+			// rather than a fixed box with a drag handle in its corner — which
+			// a finger cannot use.
+			const fit = () => {
+				field.setCssProps({ '--inkling-note-height': 'auto' });
+				field.setCssProps({ '--inkling-note-height': `${field.scrollHeight}px` });
+			};
+			field.addEventListener('input', fit);
 
-			const buttons = popover.createDiv({ cls: 'inkling-note-buttons' });
+			const footer = popover.createDiv({ cls: 'inkling-note-footer' });
+			// The keyboard shortcut, for a keyboard. A phone has none to press.
+			if (!this.contentEl.ownerDocument.body.classList.contains('is-mobile')) {
+				footer.createDiv({ cls: 'inkling-note-hint', text: 'Ctrl+Enter to save' });
+			}
+			const buttons = footer.createDiv({ cls: 'inkling-note-buttons' });
 			let settled = false;
 			const finish = (result: string | null) => {
 				if (settled) return;
@@ -1600,6 +3043,16 @@ export class PdfAnnotateView extends FileView {
 				if (this.noteEditor === popover) this.noteEditor = null;
 				resolve(result);
 			};
+
+			// Deleting is clearing the text and saving, which is how a note was
+			// always removed; a note being edited gets a button that says so.
+			if (existing) {
+				const remove = header.createEl('button', { cls: 'clickable-icon inkling-note-delete' });
+				remove.type = 'button';
+				setIcon(remove, 'trash-2');
+				setTooltip(remove, 'Delete note');
+				remove.addEventListener('click', () => finish(''));
+			}
 
 			const cancel = buttons.createEl('button', { cls: 'inkling-note-button', text: 'Cancel' });
 			cancel.type = 'button';
@@ -1615,6 +3068,7 @@ export class PdfAnnotateView extends FileView {
 			// right edge before this, a note's editor lost 251 of its 280
 			// pixels to the clip, Save button included, and could not be
 			// saved at all.
+			fit();
 			const placed = placeWithin(
 				{ x: point.x * scale + NOTE_POPOVER_MARGIN, y: point.y * scale + NOTE_POPOVER_MARGIN },
 				{ width: popover.offsetWidth, height: popover.offsetHeight },

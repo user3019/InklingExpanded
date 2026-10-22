@@ -1,6 +1,6 @@
 import { PluginSettingTab, type App, type Plugin, type SettingDefinitionItem } from 'obsidian';
 import { ALL_PRESET_COLORS } from './annotate';
-import { TEMPLATE_STYLES, TEMPLATE_STYLE_LABELS } from './templates';
+import { CANVAS_MODES, CANVAS_MODE_LABELS, TEMPLATE_STYLES, TEMPLATE_STYLE_LABELS } from './templates';
 import { colorLabelKey, defaultSettings, readSetting, writeSetting, type InklingSettings } from './settings';
 
 // The Obsidian-facing half of the settings. The pure half — the shape,
@@ -30,11 +30,23 @@ export class InklingSettingTab extends PluginSettingTab {
 		return [
 			{
 				type: 'group',
-				heading: 'Handwritten notes',
+				heading: 'New handwritten notes',
 				items: [
 					{
-						name: 'Default template',
-						desc: 'The ruling a new handwritten note starts with.',
+						name: 'Paper',
+						desc: 'Pages of a fixed size, or one infinite canvas that grows as you write.',
+						aliases: ['infinite', 'canvas', 'whiteboard'],
+						control: {
+							type: 'dropdown',
+							key: 'defaultCanvasMode',
+							defaultValue: defaults.defaultCanvasMode,
+							options: Object.fromEntries(CANVAS_MODES.map((mode) => [mode, CANVAS_MODE_LABELS[mode]])),
+						},
+					},
+					{
+						name: 'Background',
+						desc: 'Blank, lined or dot grid. The new-note dialog opens on this; you can still pick another there.',
+						aliases: ['template', 'ruling'],
 						control: {
 							type: 'dropdown',
 							key: 'defaultTemplate',
@@ -44,29 +56,29 @@ export class InklingSettingTab extends PluginSettingTab {
 					},
 					{
 						name: 'Page size',
-						desc: 'The paper size for new handwritten notes and for pages added to them.',
+						desc: 'For new notes made of pages, and for pages added to them.',
 						control: { type: 'dropdown', key: 'pageSize', defaultValue: defaults.pageSize, options: { letter: 'Letter', a4: 'A4' } },
 					},
 				],
 			},
 			{
 				type: 'group',
-				heading: 'Pen',
+				heading: 'Pen and stylus',
 				items: [
 					{
-						name: 'Pressure sensitivity',
-						desc: 'Vary a pen stroke’s width with how hard the stylus presses. Has no effect on a mouse.',
-						aliases: ['stylus', 'taper'],
-						control: { type: 'toggle', key: 'pressure', defaultValue: defaults.pressure },
-					},
-					{
-						name: 'Stroke smoothing',
-						desc: 'Fit a curve through the pen’s samples instead of joining them with straight lines.',
-						control: { type: 'toggle', key: 'smoothing', defaultValue: defaults.smoothing },
+						name: 'Stylus side button',
+						desc: 'What holding the side button does — S Pen and most Android, Windows and Wacom pens. Letting go gives the tool you had back. On Android, press it with the pen just above the screen, then touch down. An eraser end always erases. Apple Pencil’s gestures are not available to apps here.',
+						aliases: ['s pen', 'barrel', 'eraser', 'stylus button'],
+						control: {
+							type: 'dropdown',
+							key: 'penButton',
+							defaultValue: defaults.penButton,
+							options: { eraser: 'Erase', highlighter: 'Highlight', select: 'Lasso', none: 'Nothing' },
+						},
 					},
 					{
 						name: 'Shape recognition',
-						desc: 'Hold the pen still at the end of a stroke to snap a rough circle, box or line to a clean one.',
+						desc: 'Hold the pen still at the end of a stroke to turn a rough line, box or circle into a clean one.',
 						control: {
 							type: 'dropdown',
 							key: 'shapeRecognition',
@@ -74,16 +86,20 @@ export class InklingSettingTab extends PluginSettingTab {
 							options: { hold: 'Hold to snap', off: 'Off' },
 						},
 					},
+					{
+						name: 'Pens, pressure and drawing with a finger',
+						desc: 'Set in the toolbar and kept for each device: press the pen again for the round or sharp pen and its pressure switch, and use the finger button on a touch screen.',
+					},
 				],
 			},
 			{
 				type: 'group',
-				heading: 'Reading and editing',
+				heading: 'PDFs',
 				items: [
 					{
-						name: 'Invert PDF pages',
-						desc: 'Darken the PDF page, and invert the ink on it so it stays readable. Off by default: the toolbar’s contrast button flips one document without changing this.',
-						aliases: ['dark mode', 'night'],
+						name: 'Dark pages',
+						desc: 'Darken PDF pages in a dark theme, keeping ink readable. The toolbar’s contrast button flips one document either way.',
+						aliases: ['dark mode', 'night', 'invert'],
 						control: {
 							type: 'dropdown',
 							key: 'darkInversion',
@@ -92,46 +108,40 @@ export class InklingSettingTab extends PluginSettingTab {
 						},
 					},
 					{
-						name: 'Start with the toolbar collapsed',
-						desc: 'Useful on a phone, where the full tool strip covers a real slice of the page.',
-						control: { type: 'toggle', key: 'toolbarStartsCollapsed', defaultValue: defaults.toolbarStartsCollapsed },
-					},
-					{
-						name: 'Ink block captions',
-						desc:
-							'Adds a line under each ink block for a short description, so a page of handwriting reads as something in search results ' +
-							'and to a screen reader. A block that already has a caption always shows it, whether or not this is on.',
-						control: { type: 'toggle', key: 'blockCaptions', defaultValue: defaults.blockCaptions },
-					},
-					{
-						name: 'Save frequency',
-						desc:
-							'Automatic scales how often a PDF is written to its size, so a large textbook is not rewritten every few seconds. ' +
-							'Frequent saves every ten seconds whatever the size.',
+						name: 'Saving',
+						desc: 'Automatic saves large textbooks less often. Frequent saves every ten seconds whatever the size.',
 						control: { type: 'dropdown', key: 'saveCadence', defaultValue: defaults.saveCadence, options: { auto: 'Automatic', frequent: 'Frequent' } },
+					},
+					{
+						name: 'Start with the toolbar collapsed',
+						desc: 'Leaves more of a phone’s screen for the page.',
+						control: { type: 'toggle', key: 'toolbarStartsCollapsed', defaultValue: defaults.toolbarStartsCollapsed },
 					},
 				],
 			},
 			{
 				type: 'group',
-				heading: 'Ink blocks',
+				heading: 'Ink blocks in notes',
 				items: [
 					{
-						name: 'Where new ink files go',
-						desc:
-							'An ink block keeps its drawing in a file of its own, one per note, so the note stays text. ' +
-							'This decides where that file is created. Changing it never moves a file that already exists.',
+						name: 'Captions',
+						desc: 'A line under each block for a short description, which search and screen readers can use. A caption already written always shows.',
+						control: { type: 'toggle', key: 'blockCaptions', defaultValue: defaults.blockCaptions },
+					},
+					{
+						name: 'Where ink files go',
+						desc: 'Each note keeps its blocks’ drawings in one .ink file. Changing this never moves an existing file.',
 						aliases: ['ink file', 'attachments'],
 						control: {
 							type: 'dropdown',
 							key: 'inkFileLocation',
 							defaultValue: defaults.inkFileLocation,
-							options: { attachments: 'Same folder as attachments', 'beside-note': 'Same folder as the note', folder: 'A folder of their own' },
+							options: { attachments: 'With attachments', 'beside-note': 'Beside the note', folder: 'In a folder of their own' },
 						},
 					},
 					{
 						name: 'Ink file folder',
-						desc: 'To keep ink files out of search and the graph, add this folder to Files and links, Excluded files.',
+						desc: 'Exclude it under Files and links to keep ink files out of search and the graph.',
 						visible: () => this.plugin.settings.inkFileLocation === 'folder',
 						control: { type: 'folder', key: 'inkFileFolder', defaultValue: defaults.inkFileFolder, placeholder: defaults.inkFileFolder },
 					},
@@ -139,11 +149,11 @@ export class InklingSettingTab extends PluginSettingTab {
 			},
 			{
 				type: 'group',
-				heading: 'Extracted notes',
+				heading: 'Extracting annotations',
 				items: [
 					{
 						name: 'Note path',
-						desc: 'Where an extracted note goes. {folder} and {name} come from the PDF. Must contain {name}.',
+						desc: 'Where an extracted note goes. {folder} and {name} come from the PDF; {name} is required.',
 						control: {
 							type: 'text',
 							key: 'extractionNotePattern',
@@ -155,15 +165,9 @@ export class InklingSettingTab extends PluginSettingTab {
 							validate: (value) => (value.includes('{name}') ? undefined : 'Must contain {name}, or every PDF would share one note.'),
 						},
 					},
-				],
-			},
-			{
-				type: 'group',
-				heading: 'Colour categories',
-				items: [
 					{
 						name: 'What each colour means',
-						desc: 'For the pen and the highlighter alike. These become the headings in an extracted note.',
+						desc: 'For pen and highlighter alike. They become the headings of an extracted note.',
 					},
 					...ALL_PRESET_COLORS.map(({ value, label }) => ({
 						name: label,

@@ -51,6 +51,7 @@ self.onmessage = async (event: MessageEvent<WorkerRequestMessage>) => {
 					profile: opened.profile,
 					risky: opened.risky,
 					incremental: opened.incremental,
+					pageIds: opened.pageIds,
 				},
 				[opened.displayBytes],
 			);

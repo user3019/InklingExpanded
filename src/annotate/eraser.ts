@@ -10,6 +10,13 @@ export function eraseAt(annotations: Annotation[], point: Point, radius: number)
 	const result: Annotation[] = [];
 
 	for (const annotation of annotations) {
+		// A picture is not ink, and rubbing out notes written over a photo
+		// must not take the photo with them. It goes by selecting and
+		// deleting it.
+		if (annotation.kind === 'image') {
+			result.push(annotation);
+			continue;
+		}
 		// A note has no interior points to trim, the same as a shape — an
 		// eraser touch removes the whole thing.
 		if (annotation.kind !== 'stroke') {

@@ -40,6 +40,18 @@ export interface OpenedDocument {
 	session: IncrementalSession;
 	// Whether this file took the fast path, for the view's save cadence.
 	incremental: boolean;
+	// Each page's object in the file, by page index: who a page is, however
+	// its number changes — see pageIdsOf.
+	pageIds: string[];
+}
+
+// A page's identity across saves and devices. Its number is not one: a page
+// added before it, or one deleted, moves it. Its object number in the file
+// is — pdf-lib keeps every existing object's number when it saves, and gives
+// new pages new ones — so a change from another device can be matched up
+// page for page, whatever was added or deleted meanwhile.
+export function pageIdsOf(doc: PDFDocument): string[] {
+	return doc.getPages().map((page) => `${page.ref.objectNumber}.${page.ref.generationNumber}`);
 }
 
 export function toArrayBuffer(bytes: Uint8Array): ArrayBuffer {
@@ -107,6 +119,7 @@ export async function openDocument(bytes: ArrayBuffer): Promise<OpenedDocument> 
 		risky: riskyFeatures(doc),
 		session,
 		incremental: session.classification.supported,
+		pageIds: pageIdsOf(doc),
 	};
 }
 

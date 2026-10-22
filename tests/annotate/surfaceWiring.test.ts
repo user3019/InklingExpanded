@@ -31,6 +31,8 @@ describe('a mounted surface', () => {
 	// draws as a stroked path. Both are asserted because the renderer picks
 	// between them, and picking wrong is invisible until you look at ink.
 	it('fills a pressure stroke on the base layer', () => {
+		// The round pen starts with its pressure switch off.
+		surface.controller.setPressure('pen', true);
 		surface.drawStroke(
 			[
 				[100, 100],

@@ -51,15 +51,39 @@ function pick<T>(base: T, ours: T, theirs: T): T {
  * on screen in front of someone.
  */
 export function mergeInkBlocks(base: InkBlockData, ours: InkBlockData, theirs: InkBlockData): InkBlockData {
-	const baseById = byId(base.annotations);
-	const oursById = byId(ours.annotations);
-	const theirsById = byId(theirs.annotations);
+	return {
+		...theirs,
+		id: ours.id ?? theirs.id,
+		width: pick(base.width, ours.width, theirs.width),
+		height: pick(base.height, ours.height, theirs.height),
+		...captionOf(base, ours, theirs),
+		annotations: mergeAnnotations(base.annotations, ours.annotations, theirs.annotations),
+	};
+}
+
+/**
+ * The annotations that keep both sides' work, by the same rules as a block:
+ * shared with the PDF view, which merges a page the same way when another
+ * device's save lands while it is open. `same` says whether two copies of
+ * an annotation would be stored the same way, which is the only notion of
+ * "changed" that counts — each format answers it for itself.
+ */
+export function mergeAnnotations(
+	base: readonly Annotation[],
+	ours: readonly Annotation[],
+	theirs: readonly Annotation[],
+	same: (a: Annotation | undefined, b: Annotation | undefined) => boolean = sameAnnotation,
+): Annotation[] {
+	const baseById = byId(base);
+	const oursById = byId(ours);
+	const theirsById = byId(theirs);
+	const sameAnnotationAs = same;
 
 	const merged: Annotation[] = [];
 
 	// Their order first, so ink that overlaps keeps the stacking the file
 	// already describes.
-	for (const annotation of theirs.annotations) {
+	for (const annotation of theirs) {
 		const id = annotation.id;
 		const inBase = baseById.get(id);
 		const inOurs = oursById.get(id);
@@ -68,7 +92,7 @@ export function mergeInkBlocks(base: InkBlockData, ours: InkBlockData, theirs: I
 		if (inBase && !inOurs) continue;
 
 		// We changed it, so our copy is the newer of the two.
-		if (inOurs && inBase && !sameAnnotation(inOurs, inBase)) {
+		if (inOurs && inBase && !sameAnnotationAs(inOurs, inBase)) {
 			merged.push(inOurs);
 			continue;
 		}
@@ -76,7 +100,7 @@ export function mergeInkBlocks(base: InkBlockData, ours: InkBlockData, theirs: I
 		// Both added the same id without either seeing the other. Rare —
 		// ids are random — but taking theirs here and skipping the addition
 		// pass below is what stops it appearing twice.
-		if (inOurs && !inBase && !sameAnnotation(inOurs, annotation)) {
+		if (inOurs && !inBase && !sameAnnotationAs(inOurs, annotation)) {
 			merged.push(inOurs);
 			continue;
 		}
@@ -88,24 +112,17 @@ export function mergeInkBlocks(base: InkBlockData, ours: InkBlockData, theirs: I
 	// something we since changed. An addition is kept outright; a stroke we
 	// changed outlives their deletion, because a deletion is cheap to repeat
 	// and handwriting is not.
-	for (const annotation of ours.annotations) {
+	for (const annotation of ours) {
 		if (theirsById.has(annotation.id)) continue;
 		const inBase = baseById.get(annotation.id);
 		if (!inBase) {
 			merged.push(annotation);
 			continue;
 		}
-		if (!sameAnnotation(annotation, inBase)) merged.push(annotation);
+		if (!sameAnnotationAs(annotation, inBase)) merged.push(annotation);
 	}
 
-	return {
-		...theirs,
-		id: ours.id ?? theirs.id,
-		width: pick(base.width, ours.width, theirs.width),
-		height: pick(base.height, ours.height, theirs.height),
-		...captionOf(base, ours, theirs),
-		annotations: merged,
-	};
+	return merged;
 }
 
 // Spread rather than assigned, so a block with no caption on either side

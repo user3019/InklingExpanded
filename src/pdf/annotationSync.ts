@@ -1,16 +1,19 @@
-import { PDFArray, PDFDict, PDFDocument, PDFName, PDFNumber, PDFObject, PDFPage, PDFRef, PDFStream, PDFString } from 'pdf-lib';
+import { decodePDFRawStream, PDFArray, PDFDict, PDFDocument, PDFName, PDFNumber, PDFObject, PDFPage, PDFRawStream, PDFRef, PDFStream, PDFString } from 'pdf-lib';
 import { boundingBox } from '../annotate/geometry';
-import { hasPressure, outlinePath, smoothedPath } from '../annotate/stroke';
-import { ID_PREFIX, INKLING_EXTRAS, PRESSURE_KEY, QUOTE_KEY } from './annotationFormat';
+import { hasPressure, isOutlined, isSharp, SHARP_MITRE_LIMIT, strokeCentreline, strokeOutline } from '../annotate/stroke';
+import { BRUSH_KEY, ID_PREFIX, INKLING_EXTRAS, PRESSURE_KEY, QUOTE_KEY } from './annotationFormat';
 import type { TouchFn } from './changeSet';
-import { arrowHeadOps, ellipseOps, moveLineOps, noteMarkerOps, pathOps, polygonOps, rectangleOps } from './contentStream';
+import { arrowHeadOps, ellipseOps, moveLineOps, noteMarkerOps, pathOps, rectangleOps } from './contentStream';
 import {
 	Annotation,
 	DEFAULT_COLOR,
 	DEFAULT_WIDTH,
 	HIGHLIGHTER_OPACITY,
+	ImageAnnotation,
+	isPenBrush,
 	NOTE_MARKER_SIZE,
 	NoteAnnotation,
+	PicturePixels,
 	Point,
 	ShapeAnnotation,
 	StrokeAnnotation,
@@ -83,9 +86,12 @@ const HIGHLIGHTER_OPACITY_MAX = (HIGHLIGHTER_OPACITY + 1) / 2;
 // a round cap adds a bulge of half that height past the first and last
 // glyph. Round for everything else, where it is what stops a polyline
 // looking chipped at its ends.
-function strokeHeader(color: string, width: number, flatCap = false): string[] {
+// `sharp` is the sharp pen's square ends and mitred corners (see
+// annotate/stroke.ts); otherwise round joins, with round or flat ends.
+function strokeHeader(color: string, width: number, flatCap = false, sharp = false): string[] {
 	const [r, g, b] = hexToRgb(color);
-	return [`${r.toFixed(3)} ${g.toFixed(3)} ${b.toFixed(3)} RG`, `${width.toFixed(2)} w`, `${flatCap ? 0 : 1} J 1 j`];
+	const ends = sharp ? `0 J 0 j ${SHARP_MITRE_LIMIT} M` : `${flatCap ? 0 : 1} J 1 j`;
+	return [`${r.toFixed(3)} ${g.toFixed(3)} ${b.toFixed(3)} RG`, `${width.toFixed(2)} w`, ends];
 }
 
 // The annotation dict's own `/CA` entry (below) is the spec-correct way to
@@ -126,7 +132,10 @@ function buildAppearanceStream(
 		resources = { ExtGState: { GS0: gsRef } };
 		body = `/GS0 gs\n${content}`;
 	}
-	const stream = pdfDoc.context.stream(body, {
+	// Deflated. An appearance is a run of path coordinates — a page of
+	// handwriting is hundreds of them — and coordinates compress to a
+	// fraction of their text.
+	const stream = pdfDoc.context.flateStream(body, {
 		Type: 'XObject',
 		Subtype: 'Form',
 		FormType: 1,
@@ -193,13 +202,15 @@ function writeStroke(pdfDoc: PDFDocument, page: PDFPage, stroke: StrokeAnnotatio
 	// never carries pressure — recording any for one would be dead weight in
 	// every file that has one.
 	const varying = stroke.tool === 'pen' && hasPressure(stroke.points);
-	// Filled outline for a pressure stroke, stroked path for everything else:
-	// no PDF stroking operator can vary a line's width along its length.
-	// Either way the geometry comes from the same shared module the canvas
-	// draws from, so the file matches what the user watched themselves draw.
-	const content = varying
-		? [...fillHeader(stroke.color), polygonOps(outlinePath(stroke.points, stroke.width)), 'f'].join('\n')
-		: [...strokeHeader(stroke.color, stroke.width, isHighlight), pathOps(smoothedPath(stroke.points)), 'S'].join('\n');
+	const brush = stroke.tool === 'pen' && stroke.brush && stroke.brush !== 'pen' ? stroke.brush : null;
+	// Filled outline for a pressure stroke or a nib, stroked path for
+	// everything else: no PDF stroking operator can vary a line's width along
+	// its length. Either way the geometry comes from the same shared module
+	// the canvas draws from, so the file matches what the user watched
+	// themselves draw.
+	const content = isOutlined(stroke)
+		? [...fillHeader(stroke.color), pathOps(strokeOutline(stroke)), 'f'].join('\n')
+		: [...strokeHeader(stroke.color, stroke.width, isHighlight, isSharp(stroke)), pathOps(strokeCentreline(stroke)), 'S'].join('\n');
 	const apRef = buildAppearanceStream(pdfDoc, bbox, content, opacity, isHighlight ? 'Multiply' : undefined);
 
 	const fields: PdfLiteralObject = {
@@ -216,13 +227,121 @@ function writeStroke(pdfDoc: PDFDocument, page: PDFPage, stroke: StrokeAnnotatio
 		F: 4,
 		AP: { N: apRef },
 	};
-	if (varying) {
-		fields[INKLING_EXTRAS] = {
-			[PRESSURE_KEY]: stroke.points.map((p) => Math.round(Math.min(Math.max(p.p ?? 1, 0), 1) * 255)),
-		};
+	if (varying || brush) {
+		const extras: PdfLiteralObject = {};
+		if (varying) extras[PRESSURE_KEY] = stroke.points.map((p) => Math.round(Math.min(Math.max(p.p ?? 1, 0), 1) * 255));
+		if (brush) extras[BRUSH_KEY] = brush;
+		fields[INKLING_EXTRAS] = extras;
 	}
 
 	tagAndAdd(pdfDoc, page, stroke.id, withSharedFields(fields, stroke));
+}
+
+// ---- Pictures ----
+//
+// A picture is a Stamp annotation — the kind the specification has for an
+// image put onto a page — whose appearance draws the picture's own image
+// object over its box. Every reader shows it, and reading it back out takes
+// the pixels from that same image object, so they are in the file once.
+
+const PICTURE_NAME = 'Im0';
+const LOCKED_FLAG = 128;
+
+// The image object for a picture: its JPEG as it is (a PDF reader decodes
+// JPEG itself), or its RGB deflated with the alpha alongside as a soft mask.
+function pictureObject(pdfDoc: PDFDocument, picture: PicturePixels): PDFRef {
+	const { context } = pdfDoc;
+	const base = { Type: 'XObject', Subtype: 'Image', Width: picture.width, Height: picture.height, BitsPerComponent: 8 };
+	if (picture.format === 'jpeg') {
+		return context.register(context.stream(picture.data, { ...base, ColorSpace: 'DeviceRGB', Filter: 'DCTDecode' }));
+	}
+	const pixels = picture.width * picture.height;
+	const rgb = new Uint8Array(pixels * 3);
+	const alpha = new Uint8Array(pixels);
+	for (let index = 0; index < pixels; index++) {
+		rgb[index * 3] = picture.data[index * 4] ?? 0;
+		rgb[index * 3 + 1] = picture.data[index * 4 + 1] ?? 0;
+		rgb[index * 3 + 2] = picture.data[index * 4 + 2] ?? 0;
+		alpha[index] = picture.data[index * 4 + 3] ?? 255;
+	}
+	const mask = context.register(context.flateStream(alpha, { ...base, ColorSpace: 'DeviceGray' }));
+	return context.register(context.flateStream(rgb, { ...base, ColorSpace: 'DeviceRGB', SMask: mask }));
+}
+
+// The image object an annotation's appearance draws, if it is one of ours.
+function pictureRefOf(pdfDoc: PDFDocument, ref: PDFRef): PDFRef | null {
+	const dict = pdfDoc.context.lookupMaybe(ref, PDFDict);
+	const appearance = dict?.lookupMaybe(PDFName.of('AP'), PDFDict)?.lookupMaybe(PDFName.of('N'), PDFStream);
+	const image = appearance?.dict
+		.lookupMaybe(PDFName.of('Resources'), PDFDict)
+		?.lookupMaybe(PDFName.of('XObject'), PDFDict)
+		?.get(PDFName.of(PICTURE_NAME));
+	return image instanceof PDFRef ? image : null;
+}
+
+// `reuse` is the image object of this same picture already in the file —
+// a picture moved or scaled is the same pixels in a new box, and writing
+// them again would grow the file by the whole picture with every drag.
+function writeImage(pdfDoc: PDFDocument, page: PDFPage, image: ImageAnnotation, reuse: PDFRef | null): void {
+	const box = boundingBox(image);
+	const width = box.maxX - box.minX;
+	const height = box.maxY - box.minY;
+	const bbox = [box.minX, box.minY, box.maxX, box.maxY];
+	const picture = reuse ?? pictureObject(pdfDoc, image.picture);
+	const content = `q ${width.toFixed(3)} 0 0 ${height.toFixed(3)} ${box.minX.toFixed(3)} ${box.minY.toFixed(3)} cm /${PICTURE_NAME} Do Q`;
+	const appearance = pdfDoc.context.register(
+		pdfDoc.context.flateStream(content, {
+			Type: 'XObject',
+			Subtype: 'Form',
+			FormType: 1,
+			BBox: bbox,
+			Resources: { XObject: { [PICTURE_NAME]: picture } },
+		}),
+	);
+	// Flags: Print (4), and Locked (128) for a locked picture — the
+	// specification's own "may not be moved or resized", which other readers
+	// honour too.
+	const flags = image.locked ? 4 | LOCKED_FLAG : 4;
+	const fields: PdfLiteralObject = { Type: 'Annot', Subtype: 'Stamp', Rect: bbox, F: flags, AP: { N: appearance } };
+	tagAndAdd(pdfDoc, page, image.id, withSharedFields(fields, image));
+}
+
+function readPicture(dict: PDFDict): PicturePixels | null {
+	const image = dict
+		.lookupMaybe(PDFName.of('AP'), PDFDict)
+		?.lookupMaybe(PDFName.of('N'), PDFStream)
+		?.dict.lookupMaybe(PDFName.of('Resources'), PDFDict)
+		?.lookupMaybe(PDFName.of('XObject'), PDFDict)
+		?.lookupMaybe(PDFName.of(PICTURE_NAME), PDFStream);
+	if (!(image instanceof PDFRawStream)) return null;
+	const width = image.dict.lookupMaybe(PDFName.of('Width'), PDFNumber)?.asNumber() ?? 0;
+	const height = image.dict.lookupMaybe(PDFName.of('Height'), PDFNumber)?.asNumber() ?? 0;
+	if (!(width > 0) || !(height > 0)) return null;
+	if (image.dict.lookupMaybe(PDFName.of('Filter'), PDFName)?.decodeText() === 'DCTDecode') {
+		return { format: 'jpeg', width, height, data: image.getContents() };
+	}
+	const rgb = decodePDFRawStream(image).decode();
+	const mask = image.dict.lookupMaybe(PDFName.of('SMask'), PDFStream);
+	const alpha = mask instanceof PDFRawStream ? decodePDFRawStream(mask).decode() : null;
+	const pixels = width * height;
+	if (rgb.length < pixels * 3) return null;
+	const data = new Uint8Array(pixels * 4);
+	for (let index = 0; index < pixels; index++) {
+		data[index * 4] = rgb[index * 3] ?? 0;
+		data[index * 4 + 1] = rgb[index * 3 + 1] ?? 0;
+		data[index * 4 + 2] = rgb[index * 3 + 2] ?? 0;
+		data[index * 4 + 3] = alpha?.[index] ?? 255;
+	}
+	return { format: 'rgba', width, height, data };
+}
+
+// Whether two pictures are the same pixels. Their sizes, and every 97th
+// byte: enough to tell two different pictures apart without walking a
+// photo's worth of bytes on every save.
+function samePicture(a: PicturePixels, b: PicturePixels): boolean {
+	if (a.format !== b.format || a.width !== b.width || a.height !== b.height || a.data.length !== b.data.length) return false;
+	for (let index = 0; index < a.data.length; index += 97) if (a.data[index] !== b.data[index]) return false;
+	return true;
 }
 
 function writeShape(pdfDoc: PDFDocument, page: PDFPage, shape: ShapeAnnotation): void {
@@ -335,9 +454,17 @@ function writeNote(pdfDoc: PDFDocument, page: PDFPage, note: NoteAnnotation): vo
 // behind as permanent dead weight that never got reclaimed — the file only
 // ever grew, compounding with every stroke across a session, eventually
 // growing large enough to trip a sync tool's file-size limit.
-function deleteAnnotationObjects(pdfDoc: PDFDocument, ref: PDFRef): void {
+function deleteAnnotationObjects(pdfDoc: PDFDocument, ref: PDFRef, keep: ReadonlySet<PDFRef> = new Set()): void {
 	const dict = pdfDoc.context.lookupMaybe(ref, PDFDict);
 	const apRef = dict?.lookupMaybe(PDFName.of('AP'), PDFDict)?.get(PDFName.of('N'));
+	// A picture's image object, and its mask, go with it — unless the same
+	// picture is being written again in a new place and keeps them.
+	const picture = pictureRefOf(pdfDoc, ref);
+	if (picture && !keep.has(picture)) {
+		const mask = pdfDoc.context.lookupMaybe(picture, PDFStream)?.dict.get(PDFName.of('SMask'));
+		if (mask instanceof PDFRef) pdfDoc.context.delete(mask);
+		pdfDoc.context.delete(picture);
+	}
 	if (apRef instanceof PDFRef) {
 		const apStream = pdfDoc.context.lookupMaybe(apRef, PDFStream);
 		const extGState = apStream?.dict.lookupMaybe(PDFName.of('Resources'), PDFDict)?.lookupMaybe(PDFName.of('ExtGState'), PDFDict);
@@ -434,8 +561,22 @@ function sameAsWritten(existing: Annotation, incoming: Annotation): boolean {
 
 	if (existing.kind === 'stroke' && incoming.kind === 'stroke') {
 		if (existing.tool !== incoming.tool || existing.points.length !== incoming.points.length) return false;
+		if ((existing.brush ?? 'pen') !== (incoming.brush ?? 'pen')) return false;
 		if (!existing.points.every((point, index) => nearPoint(point, incoming.points[index] ?? { x: NaN, y: NaN }))) return false;
 		return JSON.stringify(storedPressures(existing)) === JSON.stringify(storedPressures(incoming));
+	}
+
+	if (existing.kind === 'image' && incoming.kind === 'image') {
+		const a = boundingBox(existing);
+		const b = boundingBox(incoming);
+		return (
+			(existing.locked === true) === (incoming.locked === true) &&
+			near(a.minX, b.minX) &&
+			near(a.minY, b.minY) &&
+			near(a.maxX, b.maxX) &&
+			near(a.maxY, b.maxY) &&
+			samePicture(existing.picture, incoming.picture)
+		);
 	}
 
 	if (existing.kind === 'shape' && incoming.kind === 'shape') {
@@ -450,6 +591,15 @@ function sameAsWritten(existing: Annotation, incoming: Annotation): boolean {
 		return near(a.minX, b.minX) && near(a.minY, b.minY) && near(a.maxX, b.maxX) && near(a.maxY, b.maxY);
 	}
 	return false;
+}
+
+// Whether two annotations in PDF space are the same mark, as the file
+// would hold them — what merging another device's save into an open view
+// asks (see pdfView.ts). Within the file's own rounding, so a stroke read
+// back from it is not mistaken for one that was edited.
+export function sameInFile(a: Annotation | undefined, b: Annotation | undefined): boolean {
+	if (!a || !b) return a === b;
+	return a.id === b.id && sameAsWritten(a, b);
 }
 
 // The annotation this ref's dict describes, or null when it cannot be read
@@ -541,18 +691,31 @@ export function writeInklingAnnotations(
 
 	const kept = new Set(plan.filter((item): item is PDFRef => item instanceof PDFRef));
 
+	// A picture coming back in a new box keeps the image object it already
+	// has in the file (see writeImage).
+	const reusedPictures = new Map<string, PDFRef>();
+	for (const item of plan) {
+		if (item instanceof PDFRef || item.kind !== 'image') continue;
+		const previous = claimable.get(item.id);
+		if (previous?.annotation?.kind !== 'image' || !samePicture(previous.annotation.picture, item.picture)) continue;
+		const picture = pictureRefOf(pdfDoc, previous.ref);
+		if (picture) reusedPictures.set(item.id, picture);
+	}
+	const keepPictures = new Set(reusedPictures.values());
+
 	touchPageContainers(page, touch);
 	// Every one of ours comes off, so the relink below can put them back in
 	// the order given — /Annots order is paint order. Only the ones not
 	// coming back are freed.
 	for (const ref of existing) {
 		page.node.removeAnnot(ref);
-		if (!kept.has(ref)) deleteAnnotationObjects(pdfDoc, ref);
+		if (!kept.has(ref)) deleteAnnotationObjects(pdfDoc, ref, keepPictures);
 	}
 	for (const item of plan) {
 		if (item instanceof PDFRef) page.node.addAnnot(item);
 		else if (item.kind === 'stroke') writeStroke(pdfDoc, page, item);
 		else if (item.kind === 'note') writeNote(pdfDoc, page, item);
+		else if (item.kind === 'image') writeImage(pdfDoc, page, item, reusedPictures.get(item.id) ?? null);
 		else writeShape(pdfDoc, page, item);
 	}
 	// Again afterwards: normalize() may have replaced an indirect slot with a
@@ -643,8 +806,16 @@ function readOne(id: string, dict: PDFDict): Annotation | null {
 		}
 		if (points.length < 2) return null;
 
+		const extras = dict.lookupMaybe(PDFName.of(INKLING_EXTRAS), PDFDict);
+		// A nib name, if one of ours. Anything else in the key — a newer
+		// build's nib, a hand edit — reads as the plain pen rather than as
+		// nothing at all.
+		const brushName = extras?.lookupMaybe(PDFName.of(BRUSH_KEY), PDFName)?.decodeText();
+		const brush = isPenBrush(brushName) && brushName !== 'pen' ? brushName : undefined;
 		const opacity = dict.lookupMaybe(PDFName.of('CA'), PDFNumber)?.asNumber() ?? 1;
-		const tool = opacity <= HIGHLIGHTER_OPACITY_MAX ? 'highlighter' : 'pen';
+		// A nib means a pen, whatever its opacity says: a pencil's graphite is
+		// translucent too, and must not come back as a highlighter.
+		const tool = !brush && opacity <= HIGHLIGHTER_OPACITY_MAX ? 'highlighter' : 'pen';
 
 		// Applied only when it describes exactly these points. A length
 		// mismatch means something else edited the path without knowing about
@@ -663,7 +834,7 @@ function readOne(id: string, dict: PDFDict): Annotation | null {
 			}
 		}
 
-		return { id, kind: 'stroke', tool, color, width, points };
+		return { id, kind: 'stroke', tool, color, width, points, ...(brush ? { brush } : {}) };
 	}
 
 	if (subtype === 'Line') {
@@ -691,6 +862,16 @@ function readOne(id: string, dict: PDFDict): Annotation | null {
 		// runs for every annotation kind — so an empty string here is
 		// filled in a moment later, not lost.
 		return { id, kind: 'note', color, width, at: { x: (rx0 + rx1) / 2, y: (ry0 + ry1) / 2 }, note: '' };
+	}
+
+	if (subtype === 'Stamp') {
+		const rect = dict.lookupMaybe(PDFName.of('Rect'), PDFArray);
+		const [rx0, ry0, rx1, ry1] = rect ? numbersFromArray(rect) : [];
+		const picture = readPicture(dict);
+		if (rx0 === undefined || ry0 === undefined || rx1 === undefined || ry1 === undefined || !picture) return null;
+		const flags = dict.lookupMaybe(PDFName.of('F'), PDFNumber)?.asNumber() ?? 0;
+		const locked = (flags & LOCKED_FLAG) !== 0;
+		return { id, kind: 'image', color, width, start: { x: rx0, y: ry0 }, end: { x: rx1, y: ry1 }, picture, ...(locked ? { locked } : {}) };
 	}
 
 	if (subtype === 'Square' || subtype === 'Circle') {

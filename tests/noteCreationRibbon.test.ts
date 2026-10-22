@@ -29,7 +29,7 @@ function registerOnFakePlugin() {
 			return document.createElement('div');
 		}),
 	};
-	registerNoteCreation(plugin as never, () => ({ template: 'lined', pageSize: 'letter' }));
+	registerNoteCreation(plugin as never, () => ({ template: 'lined', pageSize: 'letter', canvasMode: 'pages' }));
 	return { ribbons, commands };
 }
 

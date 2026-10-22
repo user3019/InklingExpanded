@@ -1,5 +1,5 @@
 {
-	"name": "inkling",
+	"name": "inkling-expanded",
 	"version": "1.0.1",
 	"description": "Handwritten and text-based annotation for Markdown notes and PDFs in Obsidian, built mobile-first for stylus input.",
 	"main": "main.js",
