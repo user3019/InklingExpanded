@@ -142,8 +142,10 @@ class CreateHandwrittenNoteModal extends Modal {
 	}
 }
 
-function sanitizeFilename(name: string): string {
-	return name.replace(INVALID_FILENAME_CHARS, '-').trim() || DEFAULT_NAME;
+// The extension is added by getUniqueNotePath, so one typed with the name
+// is taken off first — "Physics.pdf" makes Physics.pdf, not Physics.pdf.pdf.
+export function sanitizeFilename(name: string): string {
+	return name.trim().replace(/\.pdf$/i, '').replace(INVALID_FILENAME_CHARS, '-').trim() || DEFAULT_NAME;
 }
 
 function getUniqueNotePath(app: App, folder: TFolder, baseName: string): string {

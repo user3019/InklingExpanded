@@ -6,6 +6,28 @@ import { App, FileView, TFile } from 'obsidian';
 
 const CORE_PDF_VIEW = 'pdf';
 
+// This plugin's own annotate view (pdfView.ts takes its type from here), and
+// what the rest of the plugin may ask of one that has a PDF open — without
+// importing the view, which is the heavy module.
+export const ANNOTATE_VIEW_TYPE = 'inkling-pdf-view';
+
+export interface AnnotateViewHooks {
+	file: TFile | null;
+	flushPendingWrites(): Promise<void>;
+	prepareForRestore(): Promise<void>;
+	finishRestore(file: TFile): Promise<void>;
+}
+
+// Every annotate view with `file` open, in this window or any other.
+export function annotateViewsOf(app: App, file: TFile): AnnotateViewHooks[] {
+	const views: AnnotateViewHooks[] = [];
+	for (const leaf of app.workspace.getLeavesOfType(ANNOTATE_VIEW_TYPE)) {
+		const view = leaf.view as Partial<AnnotateViewHooks>;
+		if (view.file?.path === file.path && typeof view.flushPendingWrites === 'function') views.push(view as AnnotateViewHooks);
+	}
+	return views;
+}
+
 // The page Obsidian's own PDF view is currently showing. Its ephemeral
 // state is no help here — verified against the running app, the core PDF
 // view's getEphemeralState() returns `{}` no matter where it's scrolled, so

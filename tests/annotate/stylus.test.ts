@@ -1,6 +1,8 @@
 // @vitest-environment jsdom
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { attachViewNavigation, type ViewZoom } from '../../src/annotate/pointer';
+import { attachViewNavigation, isDrawingTouch, releasePointer, type ViewZoom } from '../../src/annotate/pointer';
+import { startStylusCheck } from '../../src/stylusCheck';
+import { noticeInstances } from '../harness/obsidian';
 import { ToolState } from '../../src/annotate/toolState';
 import type { StrokeAnnotation } from '../../src/annotate/types';
 import { makePointerEvent, mountTestSurface, type TestSurface } from '../harness/surface';
@@ -270,5 +272,58 @@ describe('a whole view, with a finger drawing', () => {
 		finger('pointerup', 22, 400, 100);
 		finger('pointerup', 21, 100, 200);
 		expect(drawn.annotations()).toHaveLength(0);
+	});
+});
+
+describe('a drawing finger whose page went away', () => {
+	it('is forgotten when it lifts, so a hand resting on the glass is ignored again while a pen draws', () => {
+		const scroller = document.body.appendChild(document.createElement('div'));
+		const zoom: ViewZoom = {
+			min: 0.25,
+			max: 5,
+			get: () => 1,
+			anchorAt: () => null,
+			zoomTo: vi.fn(),
+			centre: () => ({ x: 0, y: 0 }),
+			settle: () => undefined,
+		};
+		attachViewNavigation(scroller, zoom, { ignore: () => false, isBusy: () => false });
+		const drawn = mountTestSurface(800, 450, { viewZoom: zoom });
+		drawn.controller.setTool('pen');
+		drawn.controller.setTouchDrawing(true);
+		scroller.appendChild(drawn.host);
+		const overlay = drawn.host.querySelectorAll('canvas')[1];
+		overlay?.dispatchEvent(makePointerEvent('pointerdown', { pointerType: 'touch', pointerId: 31, clientX: 100, clientY: 100 }));
+		expect(isDrawingTouch(31)).toBe(true);
+
+		// The page is torn down mid-stroke: its own lift never arrives there.
+		drawn.host.remove();
+		scroller.dispatchEvent(makePointerEvent('pointerup', { pointerType: 'touch', pointerId: 31, clientX: 100, clientY: 200 }));
+		expect(isDrawingTouch(31)).toBe(false);
+	});
+});
+
+describe('letting go of a captured pointer', () => {
+	it('does nothing when the browser let go of it already', () => {
+		const el = document.createElement('div');
+		el.hasPointerCapture = () => true;
+		el.releasePointerCapture = () => {
+			throw new DOMException('not captured', 'NotFoundError');
+		};
+		expect(() => releasePointer(el, 7)).not.toThrow();
+	});
+});
+
+describe('the stylus check', () => {
+	it('stops listening the moment its message is tapped away', () => {
+		const removed = vi.spyOn(window, 'removeEventListener');
+		startStylusCheck(window);
+		const notice = noticeInstances.at(-1);
+		notice?.containerEl.dispatchEvent(new Event('click'));
+		for (const type of ['pointerdown', 'pointermove', 'pointerup', 'pointercancel']) {
+			expect(removed).toHaveBeenCalledWith(type, expect.any(Function), true);
+		}
+		expect(notice?.hidden).toBe(true);
+		removed.mockRestore();
 	});
 });

@@ -70,3 +70,29 @@ describe('eraseAt', () => {
 		expect(result[0]).toMatchObject({ points: [{ x: 900, y: 900 }, { x: 950, y: 900 }] });
 	});
 });
+
+describe('what a stroke erased is called', () => {
+	const line = () =>
+		stroke([
+			{ x: 0, y: 0 },
+			{ x: 10, y: 0 },
+			{ x: 20, y: 0 },
+			{ x: 30, y: 0 },
+			{ x: 40, y: 0 },
+		]);
+
+	it('keeps the id of a stroke only shortened at an end, so a merge sees it changed rather than replaced', () => {
+		const [shortened, ...more] = eraseAt([line()], { x: 40, y: 0 }, 3);
+		expect(more).toHaveLength(0);
+		expect(shortened?.id).toBe('ink-test');
+		expect(shortened?.kind === 'stroke' && shortened.points.length).toBe(3);
+	});
+
+	it('gives the pieces of a stroke cut in two ids of their own', () => {
+		const long = stroke(Array.from({ length: 9 }, (_, index) => ({ x: index * 10, y: 0 })));
+		const pieces = eraseAt([long], { x: 40, y: 0 }, 3);
+		expect(pieces).toHaveLength(2);
+		expect(new Set(pieces.map((piece) => piece.id)).size).toBe(2);
+		expect(pieces.some((piece) => piece.id === 'ink-test')).toBe(false);
+	});
+});

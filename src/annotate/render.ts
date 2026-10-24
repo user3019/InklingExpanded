@@ -423,10 +423,20 @@ function drawSelectionRings(ctx: CanvasRenderingContext2D, selected: Annotation[
 // instead when the picture is at the top of the page and there is no room
 // above. While a picture is being cropped the same bar holds done and cancel.
 
-export type PictureButton = 'lock' | 'crop' | 'delete';
+export type SelectionButton = 'copy' | 'lock' | 'crop' | 'delete';
+export type PictureButton = SelectionButton;
 export type CropButton = 'apply' | 'cancel';
 
-const PICTURE_BUTTONS: readonly PictureButton[] = ['lock', 'crop', 'delete'];
+const PICTURE_BUTTONS: readonly SelectionButton[] = ['copy', 'lock', 'crop', 'delete'];
+// Anything else selected — writing, shapes, several pictures at once.
+const INK_BUTTONS: readonly SelectionButton[] = ['copy', 'delete'];
+
+// The buttons a selection's bar has: a single picture's own four, or copy
+// and delete for anything else.
+export function selectionButtons(selected: readonly Annotation[]): readonly SelectionButton[] {
+	const [only] = selected;
+	return selected.length === 1 && only?.kind === 'image' ? PICTURE_BUTTONS : INK_BUTTONS;
+}
 const CROP_BUTTONS: readonly CropButton[] = ['apply', 'cancel'];
 
 const BAR_HEIGHT = 32;
@@ -462,12 +472,33 @@ function barButtonAt<T extends string>(box: Rect, chrome: number, point: Point, 
 	return buttons[Math.min(Math.max(index, 0), buttons.length - 1)] ?? null;
 }
 
-export function pictureButtonCentres(box: Rect, chrome: number): Record<PictureButton, Point> {
+export function pictureButtonCentres(box: Rect, chrome: number): Record<SelectionButton, Point> {
 	return barCentres(box, chrome, PICTURE_BUTTONS);
 }
 
-export function pictureButtonAt(box: Rect, chrome: number, point: Point): PictureButton | null {
+export function pictureButtonAt(box: Rect, chrome: number, point: Point): SelectionButton | null {
 	return barButtonAt(box, chrome, point, PICTURE_BUTTONS);
+}
+
+// The same for any selection, by what it holds — see selectionButtons.
+export function selectionButtonCentres(box: Rect, chrome: number, selected: readonly Annotation[]): Partial<Record<SelectionButton, Point>> {
+	return barCentres(box, chrome, selectionButtons(selected));
+}
+
+export function selectionButtonAt(box: Rect, chrome: number, point: Point, selected: readonly Annotation[]): SelectionButton | null {
+	return barButtonAt(box, chrome, point, selectionButtons(selected));
+}
+
+// Where a paste is offered: one button, over the spot it would land on.
+const PASTE_BUTTONS = ['paste'] as const;
+const spot = (at: Point): Rect => ({ minX: at.x, minY: at.y, maxX: at.x, maxY: at.y });
+
+export function pasteButtonCentre(at: Point, chrome: number): Point {
+	return barCentres(spot(at), chrome, PASTE_BUTTONS).paste;
+}
+
+export function pasteButtonAt(at: Point, chrome: number, point: Point): boolean {
+	return barButtonAt(spot(at), chrome, point, PASTE_BUTTONS) !== null;
 }
 
 // The crop's bar sits over the crop, which is what moves while cropping.
@@ -531,26 +562,107 @@ function drawBar(ctx: CanvasRenderingContext2D, bar: { left: number; top: number
 	ctx.stroke();
 }
 
-function drawPictureButtons(ctx: CanvasRenderingContext2D, box: Rect, chrome: number, locked: boolean): void {
-	const bar = pictureBar(box, chrome);
+function drawSelectionButtons(ctx: CanvasRenderingContext2D, box: Rect, chrome: number, selected: readonly Annotation[]): void {
+	const buttons = selectionButtons(selected);
+	const locked = selected.some(isLockedPicture);
+	const bar = pictureBar(box, chrome, buttons.length);
 	const radius = bar.height / 2;
 	ctx.save();
 	// The bar: white, a hairline of the frame's blue, and a soft shadow so it
 	// reads as floating over the page.
-	drawBar(ctx, bar, chrome, PICTURE_BUTTONS.length);
+	drawBar(ctx, bar, chrome, buttons.length);
 
-	const centres = pictureButtonCentres(box, chrome);
-	// The pressed look for a locked picture: the lock's half of the bar
+	const centres = selectionButtonCentres(box, chrome, selected);
+	// The pressed look for a locked picture: the lock's part of the bar
 	// tinted, its icon in the frame's blue.
-	if (locked) {
+	const lockIndex = buttons.indexOf('lock');
+	if (locked && lockIndex >= 0) {
+		const left = bar.left + BAR_BUTTON * lockIndex * chrome;
 		ctx.beginPath();
-		ctx.roundRect(bar.left + 2 * chrome, bar.top + 2 * chrome, BAR_BUTTON * chrome - 2 * chrome, bar.height - 4 * chrome, radius - 2 * chrome);
+		ctx.roundRect(left + 2 * chrome, bar.top + 2 * chrome, BAR_BUTTON * chrome - 4 * chrome, bar.height - 4 * chrome, radius - 2 * chrome);
 		ctx.fillStyle = 'rgba(25, 113, 194, 0.12)';
 		ctx.fill();
 	}
-	drawLockIcon(ctx, centres.lock, chrome, locked, locked ? SELECTION_COLOR : BAR_ICON);
-	drawCropIcon(ctx, centres.crop, chrome, locked ? BAR_DISABLED : BAR_ICON);
-	drawTrashIcon(ctx, centres.delete, chrome, locked ? BAR_DISABLED : BAR_ICON);
+	// Copying a locked picture is fine — the copy is not locked. Cropping
+	// and deleting it are not.
+	if (centres.copy) drawCopyIcon(ctx, centres.copy, chrome, BAR_ICON);
+	if (centres.lock) drawLockIcon(ctx, centres.lock, chrome, locked, locked ? SELECTION_COLOR : BAR_ICON);
+	if (centres.crop) drawCropIcon(ctx, centres.crop, chrome, locked ? BAR_DISABLED : BAR_ICON);
+	if (centres.delete) drawTrashIcon(ctx, centres.delete, chrome, locked ? BAR_DISABLED : BAR_ICON);
+	ctx.restore();
+}
+
+// A paste on offer: a bar of one button over where it would land.
+function drawPasteOffer(ctx: CanvasRenderingContext2D, at: Point, chrome: number): void {
+	ctx.save();
+	drawBar(ctx, pictureBar(spot(at), chrome, PASTE_BUTTONS.length), chrome, PASTE_BUTTONS.length);
+	drawPasteIcon(ctx, pasteButtonCentre(at, chrome), chrome, SELECTION_COLOR);
+	ctx.restore();
+	// And the spot itself, small, so it is plain where the copy goes.
+	ctx.save();
+	ctx.beginPath();
+	ctx.arc(at.x, at.y, 3 * chrome, 0, Math.PI * 2);
+	ctx.fillStyle = SELECTION_COLOR;
+	ctx.fill();
+	ctx.lineWidth = 1.5 * chrome;
+	ctx.strokeStyle = '#ffffff';
+	ctx.stroke();
+	ctx.restore();
+}
+
+// Lucide's copy.
+function drawCopyIcon(ctx: CanvasRenderingContext2D, at: Point, chrome: number, colour: string): void {
+	const u = (16 / 24) * chrome;
+	const x = (value: number) => at.x + (value - 12) * u;
+	const y = (value: number) => at.y + (value - 12) * u;
+	ctx.save();
+	ctx.strokeStyle = colour;
+	ctx.lineWidth = 2 * u;
+	ctx.lineCap = 'round';
+	ctx.lineJoin = 'round';
+	ctx.beginPath();
+	ctx.roundRect(x(8), y(8), 14 * u, 14 * u, 2 * u);
+	ctx.stroke();
+	ctx.beginPath();
+	ctx.moveTo(x(4), y(16));
+	ctx.quadraticCurveTo(x(2), y(16), x(2), y(14));
+	ctx.lineTo(x(2), y(4));
+	ctx.quadraticCurveTo(x(2), y(2), x(4), y(2));
+	ctx.lineTo(x(14), y(2));
+	ctx.quadraticCurveTo(x(16), y(2), x(16), y(4));
+	ctx.stroke();
+	ctx.restore();
+}
+
+// Lucide's clipboard-paste, simplified: the board and its clip.
+function drawPasteIcon(ctx: CanvasRenderingContext2D, at: Point, chrome: number, colour: string): void {
+	const u = (16 / 24) * chrome;
+	const x = (value: number) => at.x + (value - 12) * u;
+	const y = (value: number) => at.y + (value - 12) * u;
+	ctx.save();
+	ctx.strokeStyle = colour;
+	ctx.lineWidth = 2 * u;
+	ctx.lineCap = 'round';
+	ctx.lineJoin = 'round';
+	ctx.beginPath();
+	ctx.roundRect(x(8), y(2), 8 * u, 4 * u, 1 * u);
+	ctx.stroke();
+	ctx.beginPath();
+	ctx.moveTo(x(16), y(4));
+	ctx.lineTo(x(18), y(4));
+	ctx.quadraticCurveTo(x(20), y(4), x(20), y(6));
+	ctx.lineTo(x(20), y(20));
+	ctx.quadraticCurveTo(x(20), y(22), x(18), y(22));
+	ctx.lineTo(x(6), y(22));
+	ctx.quadraticCurveTo(x(4), y(22), x(4), y(20));
+	ctx.lineTo(x(4), y(6));
+	ctx.quadraticCurveTo(x(4), y(4), x(6), y(4));
+	ctx.lineTo(x(8), y(4));
+	ctx.moveTo(x(9), y(13));
+	ctx.lineTo(x(15), y(13));
+	ctx.moveTo(x(12), y(10));
+	ctx.lineTo(x(12), y(16));
+	ctx.stroke();
 	ctx.restore();
 }
 
@@ -828,6 +940,8 @@ export interface OverlayOptions {
 	eraserCursor?: { point: Point; radius: number } | null;
 	// A picture being cropped, and the part of it that is to stay.
 	crop?: { picture: Rect; rect: Rect } | null;
+	// Where a paste is on offer (see AnnotationController.offerPasteAt).
+	pasteAt?: Point | null;
 	// Canvas pixels per screen pixel, which every piece of selection chrome
 	// is sized by. 1 where the canvas is shown at its own size.
 	chrome?: number;
@@ -885,6 +999,12 @@ export function drawInk(ctx: CanvasRenderingContext2D, annotations: Annotation[]
 export function renderHighlights(ctx: CanvasRenderingContext2D, annotations: Annotation[], draft?: Annotation | null): void {
 	const { canvas } = ctx;
 	ctx.clearRect(0, 0, canvas.width, canvas.height);
+	drawHighlights(ctx, annotations, draft);
+}
+
+// The highlight layer's strokes without the clear, under whatever transform
+// `ctx` has — for the PDF view's detail layer, as drawInk is.
+export function drawHighlights(ctx: CanvasRenderingContext2D, annotations: Annotation[], draft?: Annotation | null): void {
 	for (const annotation of annotations) {
 		if (isHighlight(annotation)) drawAnnotation(ctx, annotation, true);
 	}
@@ -915,11 +1035,11 @@ export function drawOverlay(ctx: CanvasRenderingContext2D, options: OverlayOptio
 		// Nothing to size on a selection that cannot move.
 		const locked = selected.some(isLockedPicture);
 		drawSelectionFrame(ctx, box, chrome, !locked);
-		const [only] = selected;
-		if (selected.length === 1 && only?.kind === 'image') drawPictureButtons(ctx, box, chrome, locked);
+		drawSelectionButtons(ctx, box, chrome, selected);
 	}
 
 	if (options.crop) drawCrop(ctx, options.crop.picture, options.crop.rect, chrome);
+	if (options.pasteAt) drawPasteOffer(ctx, options.pasteAt, chrome);
 	if (options.draft) drawAnnotation(ctx, options.draft, false);
 	if (options.lassoPath) drawLasso(ctx, options.lassoPath, chrome);
 

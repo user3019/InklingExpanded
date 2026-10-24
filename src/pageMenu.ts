@@ -2,13 +2,8 @@ import { App, FileView, Menu, Modal, Notice, TFile } from 'obsidian';
 import { toArrayBuffer } from './binary';
 import { removePage } from './pdf/pages';
 import { writeBinarySafely } from './vaultWrite';
-import { refreshCoreReaders } from './coreViews';
+import { annotateViewsOf, refreshCoreReaders } from './coreViews';
 import { backUp } from './backups';
-
-// The annotate view's type (pdfView.ts's VIEW_TYPE_PDF), named here rather
-// than imported: pdfView.ts is the heavy module, and this menu runs in
-// Obsidian's own reader.
-const ANNOTATE_VIEW_TYPE = 'inkling-pdf-view';
 
 // A menu on the page thumbnails of Obsidian's own PDF reader — a long press
 // on a tablet, a right-click on a desktop — that can delete a page.
@@ -99,10 +94,7 @@ export async function deletePage(app: App, file: TFile, pageNumber: number): Pro
 		// saved yet goes into the file first, so the page is deleted from the
 		// file as it really is — and that view then takes the deletion in as
 		// it would one from another device.
-		for (const leaf of app.workspace.getLeavesOfType(ANNOTATE_VIEW_TYPE)) {
-			const view = leaf.view as Partial<{ file: TFile | null; flushPendingWrites(): Promise<void> }>;
-			if (view.file?.path === file.path) await view.flushPendingWrites?.();
-		}
+		for (const view of annotateViewsOf(app, file)) await view.flushPendingWrites();
 		const before = await app.vault.readBinary(file);
 		const result = await removePage(before, pageNumber);
 		if (result.kind === 'refused') {

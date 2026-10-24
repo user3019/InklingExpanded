@@ -121,6 +121,18 @@ const MAX_PLAUSIBLE_PEN_CONTACT_PX = 40;
 // handwriting session.
 let pointerCaptureFailureLogged = false;
 
+// Lets go of a pointer this element captured. The browser may have let go
+// of it already — a pointerup or pointercancel releases capture by itself,
+// and an element taken out of the page loses it — and releasing one that
+// is not held throws.
+export function releasePointer(el: Element, pointerId: number): void {
+	try {
+		if (el.hasPointerCapture(pointerId)) el.releasePointerCapture(pointerId);
+	} catch {
+		// Already released.
+	}
+}
+
 export function capturePointer(el: Element, pointerId: number): void {
 	try {
 		el.setPointerCapture(pointerId);
@@ -894,8 +906,14 @@ export function attachViewNavigation(scroller: HTMLElement, zoom: ViewZoom, opti
 			return;
 		}
 		// Busy with a pen: a touch now is the hand holding it. Busy with a
-		// drawing finger is different — a second finger means a pinch.
-		if (options.isBusy() && drawingTouches.size === 0 && !touches.size) return;
+		// drawing finger is different — a second finger means a pinch. With
+		// no finger down at all, no finger can be drawing: an id still listed
+		// as one is a leftover — a page taken away mid-stroke never says its
+		// finger lifted — and would turn this palm check off for good.
+		if (options.isBusy() && !touches.size) {
+			drawingTouches.clear();
+			return;
+		}
 
 		touches.set(event.pointerId, { x: event.clientX, y: event.clientY });
 		if (touches.size === 2 && !pinch) {
@@ -970,6 +988,11 @@ export function attachViewNavigation(scroller: HTMLElement, zoom: ViewZoom, opti
 
 	const endPointer = (event: PointerEvent, cancelled: boolean) => {
 		touches.delete(event.pointerId);
+		// Every finger reaches the view, drawing ones included (see
+		// onPointerDown), so a drawing finger's lift is seen here even when
+		// the page it drew on is gone — and no finger down means none drawing.
+		drawingTouches.delete(event.pointerId);
+		if (touches.size === 0) drawingTouches.clear();
 		if (longPress?.pointerId === event.pointerId) cancelLongPress();
 		if (pinch && pinch.ids.includes(event.pointerId)) {
 			// Over when either finger lifts. The one still down does not

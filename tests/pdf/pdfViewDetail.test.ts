@@ -159,4 +159,41 @@ describe('the detail layer', () => {
 		// The harness runs animation frames at once.
 		expect(calls.length).toBeGreaterThan(before);
 	});
+
+	it('draws highlights sharp too, multiplied into the sharp page under the ink', async () => {
+		const { internals, content } = openZoomed({ rendered: 6, ideal: 2, zoom: 5 });
+		const highlight: Annotation = {
+			id: 'h',
+			kind: 'stroke',
+			tool: 'highlighter',
+			color: '#ffd400',
+			width: 20,
+			points: [{ x: 100, y: 100 }, { x: 400, y: 100 }],
+		};
+		internals.controller.seedPage(1, [highlight]);
+		await internals.renderDetail(1);
+
+		const layers = Array.from(content.children, (child: Element) => child.className);
+		const sharp = layers.findIndex((name) => name.includes('inkling-highlight-detail'));
+		expect(sharp).toBeGreaterThan(layers.findIndex((name) => name.includes('inkling-pdf-detail')));
+		expect(sharp).toBeLessThan(layers.findIndex((name) => name.includes('inkling-annotation-base')));
+
+		const ops = (canvas: string) =>
+			(content.querySelector<HTMLCanvasElement>(canvas)?.getContext('2d') as unknown as { calls: Array<{ op: string }> }).calls.map(
+				(call) => call.op,
+			);
+		expect(ops('.inkling-highlight-detail').some((op) => op === 'stroke' || op === 'fill')).toBe(true);
+		// Not on the ink's sharp copy as well.
+		expect(ops('.inkling-ink-detail').some((op) => op === 'stroke' || op === 'fill')).toBe(false);
+
+		// The stretched highlights are cut away under it, so the two are not
+		// multiplied in twice.
+		const stretched = content.querySelector<HTMLElement>('.inkling-annotation-highlight');
+		expect(stretched?.classList.contains('has-detail-hole')).toBe(true);
+		expect(stretched?.style.getPropertyValue('--inkling-detail-right')).toBe('92%');
+
+		internals.removeDetail(1);
+		expect(content.querySelector('.inkling-highlight-detail')).toBeNull();
+		expect(stretched?.classList.contains('has-detail-hole')).toBe(false);
+	});
 });

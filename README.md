@@ -29,6 +29,12 @@ over any PDF in your vault. Ink is written into the file as real PDF
 annotations, so it shows up in Obsidian's own reader, in Xodo, in Acrobat —
 anywhere.
 
+**Copy and paste.** Pick writing out with the lasso and press copy on the
+bar above it (or Ctrl/Cmd+C; X cuts). Hold the lasso — pen or finger — on
+the spot it should go, and tap paste; Ctrl/Cmd+V pastes where the pointer
+is. It pastes the same size on any page, into another PDF or into a note's
+ink block, and comes selected, ready to move.
+
 **Feels like ink.** Every stylus sample is captured, not just the one per
 frame the browser volunteers; the hand's tremor and the stylus's noisy
 pressure are steadied out without the line lagging behind the tip; and

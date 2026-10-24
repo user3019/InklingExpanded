@@ -1,9 +1,10 @@
 import { FileView, Menu, Notice, setIcon, setTooltip, TFile, WorkspaceLeaf } from 'obsidian';
 import { chooseDeviceFile, chooseVaultFile, PICTURE_EXTENSIONS, placePicture, preparePicture } from './importing';
-import { refreshCoreReaders } from './coreViews';
+import { ANNOTATE_VIEW_TYPE, refreshCoreReaders } from './coreViews';
 import { AnnotationMode, getDocument, RenderingCancelledException, type PageViewport, type PDFDocumentProxy, type PDFPageProxy, type RenderTask } from 'pdfjs-dist';
 import { PDFDocument } from 'pdf-lib';
 import { AnnotationController, buildToolbar, HistoryStack, paletteFor, ToolState, type Annotation, type Point, type ToolType } from './annotate';
+import { HIGHLIGHTER_OPACITY } from './annotate/types';
 import { attachViewNavigation, type ViewZoom } from './annotate/pointer';
 import { createId } from './annotate/id';
 import { AnnotationWriterClient, type OpenResult } from './pdf/annotationWriterClient';
@@ -53,7 +54,7 @@ const BACKGROUND_ICONS: Record<TemplateStyle, string> = { blank: 'square', lined
 // fingerprint, an API too new for Obsidian's bundled Chromium. Check that a
 // newer pin still guards it (grep pdf.worker.mjs for "toHex") before bumping.
 
-export const VIEW_TYPE_PDF = 'inkling-pdf-view';
+export const VIEW_TYPE_PDF = ANNOTATE_VIEW_TYPE;
 
 // Obsidian's own built-in PDF view type id — used to switch a leaf back to
 // native reading (page number/zoom/outline, and no pdf-lib/editing cost)
@@ -149,8 +150,15 @@ interface PageDetail {
 	offsetX: number;
 	offsetY: number;
 	pdf: HTMLCanvasElement | null;
+	// The highlighter's strokes, multiplied into the sharp page as the page's
+	// own highlight layer is into the page — without one, highlights stayed
+	// the stretched, blurred copy however far the page was zoomed.
+	highlight: HTMLCanvasElement | null;
 	ink: HTMLCanvasElement | null;
 	overlay: HTMLCanvasElement | null;
+	// Whether a highlighter stroke was being drawn at the last paint, so the
+	// paint after it lifts takes it off again.
+	highlightDrafting: boolean;
 	task: RenderTask | null;
 	generation: number;
 	inkFrame: number | null;
@@ -535,6 +543,17 @@ export class PdfAnnotateView extends FileView {
 	private knownDisk: { path: string; size: number; mtime: number } | null = null;
 	private ownWrites = 0;
 	private remoteHandle: number | null = null;
+	// Closing: a change from another device taken in now is saved, but the
+	// view is not reloaded from it — it is on its way out.
+	private unloading = false;
+	// A restore under way (see prepareForRestore): the file is about to be
+	// replaced on purpose, and that is not another device's change to merge.
+	private restoring = false;
+	// A save put off because a pen was down, retried shortly (see
+	// flushCurrentFileIfAny).
+	private gestureFlushHandle: number | null = null;
+	// The find field's pause before it searches (see buildNavigationPanel).
+	private navSearchHandle: number | null = null;
 	// Whether another device has written to this file while it was open
 	// here — which makes this view save sooner (see markPageDirty).
 	private sharedWithAnotherDevice = false;
@@ -592,6 +611,9 @@ export class PdfAnnotateView extends FileView {
 			isInverted: () => this.isInverted(),
 			viewZoom: this.viewZoom,
 			getPenButtonAction: () => getSettings().penButton,
+			// Canvas pixels per PDF point, as the page is backed now: what a
+			// copy is sized by, so it pastes the same size on any page.
+			getUnitScale: (pageNumber) => this.viewports.get(pageNumber)?.scale ?? 1,
 			onPageRepainted: (pageNumber, layer) => this.repaintDetail(pageNumber, layer),
 		});
 	}
@@ -629,7 +651,9 @@ export class PdfAnnotateView extends FileView {
 		// takes focus — a canvas is not focusable and there is nothing to
 		// type into. So listen globally and check that this view is the one
 		// the user is actually looking at.
-		this.registerDomEvent(document, 'keydown', (event) => this.handleKey(event));
+		// The view's own window's document — a view moved into a popout
+		// window types into that window, not the main one.
+		this.registerDomEvent(this.contentEl.ownerDocument, 'keydown', (event) => this.handleKey(event));
 		// contentEl is the scroll container, and outlives every file shown
 		// in it, so this is registered once here rather than per load.
 		// Dragging, pinching and trackpad zoom, anywhere in the view — over a
@@ -639,7 +663,9 @@ export class PdfAnnotateView extends FileView {
 				ignore: (target) => target instanceof Element && target.closest(NAVIGATION_EXEMPT) !== null,
 				isBusy: () => this.controller.isGestureActive(),
 				onPinchStart: () => this.controller.abandonGesture(),
-				onLongPress: (at) => this.pickUpPictureAt(at),
+				// A finger held on a picture picks it up; held anywhere else with
+				// something copied, it offers a paste there.
+				onLongPress: (at) => this.pickUpPictureAt(at) || this.offerPasteAt(at),
 				onTap: (at) => this.tapAt(at),
 			}),
 		);
@@ -689,6 +715,14 @@ export class PdfAnnotateView extends FileView {
 				if (this.controller.isReadOnly()) return false;
 				this.controller.redo();
 				return true;
+			// Only with ink selected, or something copied: otherwise the keys
+			// are left to do what they do anywhere else in Obsidian.
+			case 'c':
+				return this.controller.copySelection();
+			case 'x':
+				return this.controller.cutSelection();
+			case 'v':
+				return this.pasteFromKeyboard();
 			case '=':
 			case '+':
 				this.controller.zoomBy(KEYBOARD_ZOOM_STEP);
@@ -1030,8 +1064,27 @@ export class PdfAnnotateView extends FileView {
 	}
 
 	async onUnloadFile(): Promise<void> {
+		const file = this.currentFile;
+		// Saved first, with the view still whole: a save that finds the file
+		// changed by another device takes that change in before it saves, and
+		// that needs this file still open and its render token unchanged.
+		// Bumping the token before the save used to make it give up there,
+		// and the teardown below then threw the unsaved ink away.
+		this.unloading = true;
+		try {
+			await this.flushAnnotationsIfDirty(file);
+			if (file && this.dirtyPages.size > 0 && (await this.changedOnDisk(file))) {
+				await this.pullRemote(file, true);
+				await this.flushAnnotationsIfDirty(file);
+			}
+			if (file && this.dirtyPages.size > 0) {
+				console.error(`Inkling: ink on ${this.dirtyPages.size} page(s) of ${file.path} could not be saved before it closed.`);
+				new Notice(`Inkling: some ink on “${file.basename}” could not be saved before it closed.`);
+			}
+		} finally {
+			this.unloading = false;
+		}
 		this.renderToken++;
-		await this.flushAnnotationsIfDirty(this.currentFile);
 		this.currentFile = null;
 		this.teardown();
 	}
@@ -1079,6 +1132,10 @@ export class PdfAnnotateView extends FileView {
 		this.reportedCanvasLimit = false;
 		if (this.remoteHandle !== null) window.clearTimeout(this.remoteHandle);
 		this.remoteHandle = null;
+		if (this.gestureFlushHandle !== null) window.clearTimeout(this.gestureFlushHandle);
+		this.gestureFlushHandle = null;
+		if (this.navSearchHandle !== null) window.clearTimeout(this.navSearchHandle);
+		this.navSearchHandle = null;
 		this.sharedWithAnotherDevice = false;
 		for (const pageNumber of [...this.details.keys()]) this.removeDetail(pageNumber);
 		if (this.detailHandle !== null) window.clearTimeout(this.detailHandle);
@@ -1554,7 +1611,11 @@ export class PdfAnnotateView extends FileView {
 		// cheap and short-lived since gestures normally last well under a
 		// second.
 		if (this.controller.isGestureActive()) {
-			window.setTimeout(() => this.flushCurrentFileIfAny(), 250);
+			if (this.gestureFlushHandle !== null) window.clearTimeout(this.gestureFlushHandle);
+			this.gestureFlushHandle = window.setTimeout(() => {
+				this.gestureFlushHandle = null;
+				this.flushCurrentFileIfAny();
+			}, 250);
 			return;
 		}
 		void this.flushAnnotations(this.currentFile);
@@ -1574,9 +1635,23 @@ export class PdfAnnotateView extends FileView {
 			window.clearTimeout(this.maxWaitHandle);
 			this.maxWaitHandle = null;
 		}
+		if (this.gestureFlushHandle !== null) {
+			window.clearTimeout(this.gestureFlushHandle);
+			this.gestureFlushHandle = null;
+		}
 		// A save still in flight counts even with nothing new behind it: the
 		// callers go on to read the file or terminate the writer.
 		if (file && (this.dirtyPages.size > 0 || this.saving)) await this.flushAnnotations(file);
+		// A save that found the file changed by another device leaves its ink
+		// dirty while that change is taken in (see saveDirtyPages). Waited
+		// for, and the ink then saved on top of it: every caller goes on to
+		// read the file, reload it or tear the view down, and each of those
+		// would lose it. Never called from inside a pull (takeInRemote saves
+		// directly), so this cannot wait on itself.
+		for (let round = 0; file && round < 3 && this.pulling; round++) {
+			await this.pulling.catch(() => undefined);
+			if (this.dirtyPages.size > 0 || this.saving) await this.flushAnnotations(file);
+		}
 	}
 
 	// One save at a time. Each save is built against what the writer believes
@@ -1686,6 +1761,13 @@ export class PdfAnnotateView extends FileView {
 	}
 
 	private async addPage(): Promise<void> {
+		// An infinite canvas is one page by definition: a second would end it
+		// being one — it would never grow again. The toolbar hides the button
+		// there; this is for any other way of asking.
+		if (this.infiniteBox) {
+			new Notice('Inkling: an infinite canvas grows by itself and cannot have more pages.');
+			return;
+		}
 		await this.rebuild('add-page', 'could not add a page to this note.', async (bytes) => {
 			const pdfDoc = await PDFDocument.load(bytes);
 			// currentPageNumber is 1-based; as a 0-based insertion index that
@@ -1946,27 +2028,39 @@ export class PdfAnnotateView extends FileView {
 		if (detail.pdf) detail.pdf.replaceWith(canvas);
 		else pageCanvas.after(canvas);
 		detail.pdf = canvas;
+		// Under the ink, as the page's own highlight layer is, and over the
+		// sharp page it multiplies into.
+		if (!detail.highlight) {
+			detail.highlight = createEl('canvas', { cls: 'inkling-detail-layer inkling-highlight-detail' });
+			detail.highlight.setCssProps({ '--inkling-highlight-opacity': String(HIGHLIGHTER_OPACITY) });
+		}
+		if (!detail.highlight.isConnected) base.before(detail.highlight);
 		detail.ink ??= createEl('canvas', { cls: 'inkling-detail-layer inkling-ink-detail' });
 		if (!detail.ink.isConnected) base.after(detail.ink);
 		detail.overlay ??= createEl('canvas', { cls: 'inkling-detail-layer inkling-overlay-detail' });
 		if (!detail.overlay.isConnected) overlay.after(detail.overlay);
-		for (const layer of [detail.ink, detail.overlay]) {
+		for (const layer of [detail.highlight, detail.ink, detail.overlay]) {
 			layer.width = canvas.width;
 			layer.height = canvas.height;
 		}
 
-		const place = {
-			'--inkling-detail-left': `${detail.left * 100}%`,
-			'--inkling-detail-top': `${detail.top * 100}%`,
-			'--inkling-detail-right': `${detail.right * 100}%`,
-			'--inkling-detail-bottom': `${detail.bottom * 100}%`,
-		};
-		for (const layer of [detail.pdf, detail.ink, detail.overlay]) layer.setCssProps(place);
+		const place = this.detailPlace(detail);
+		for (const layer of [detail.pdf, detail.highlight, detail.ink, detail.overlay]) layer.setCssProps(place);
 		base.setCssProps(place);
 		base.addClass('has-detail-hole');
 		overlay.addClass('is-detailed');
 		this.paintDetail(pageNumber, 'ink');
 		this.paintDetail(pageNumber, 'overlay');
+	}
+
+	// Where a page's sharp region is, as fractions of the page.
+	private detailPlace(detail: PageDetail): Record<string, string> {
+		return {
+			'--inkling-detail-left': `${detail.left * 100}%`,
+			'--inkling-detail-top': `${detail.top * 100}%`,
+			'--inkling-detail-right': `${detail.right * 100}%`,
+			'--inkling-detail-bottom': `${detail.bottom * 100}%`,
+		};
 	}
 
 	private createDetail(pageNumber: number): PageDetail {
@@ -1979,8 +2073,10 @@ export class PdfAnnotateView extends FileView {
 			offsetX: 0,
 			offsetY: 0,
 			pdf: null,
+			highlight: null,
 			ink: null,
 			overlay: null,
+			highlightDrafting: false,
 			task: null,
 			generation: 0,
 			inkFrame: null,
@@ -1999,9 +2095,11 @@ export class PdfAnnotateView extends FileView {
 		if (detail.overlayFrame !== null) window.cancelAnimationFrame(detail.overlayFrame);
 		const content = detail.pdf?.parentElement;
 		detail.pdf?.remove();
+		detail.highlight?.remove();
 		detail.ink?.remove();
 		detail.overlay?.remove();
 		content?.querySelector('.inkling-annotation-base')?.removeClass('has-detail-hole');
+		content?.querySelector('.inkling-annotation-highlight')?.removeClass('has-detail-hole');
 		content?.querySelector('.inkling-annotation-overlay')?.removeClass('is-detailed');
 	}
 
@@ -2018,12 +2116,46 @@ export class PdfAnnotateView extends FileView {
 		});
 	}
 
+	// The ink layer brings the highlights with it: a highlight committed is
+	// a change to both. The live layer brings them while one is being drawn,
+	// and once more as it ends — the overlay never carries a highlighter's
+	// stroke (see redrawHighlightDraft in the controller).
 	private paintDetail(pageNumber: number, layer: 'ink' | 'overlay'): void {
 		const detail = this.details.get(pageNumber);
-		const canvas = layer === 'ink' ? detail?.ink : detail?.overlay;
+		if (!detail) return;
+		if (layer === 'ink') {
+			this.paintDetailLayer(pageNumber, detail, detail.ink, (ctx) => this.controller.drawInkTo(pageNumber, ctx));
+			this.paintDetailHighlights(pageNumber, detail);
+			return;
+		}
+		this.paintDetailLayer(pageNumber, detail, detail.overlay, (ctx) => this.controller.drawOverlayTo(pageNumber, ctx));
+		const drafting = this.controller.hasHighlightDraft(pageNumber);
+		if (drafting || detail.highlightDrafting) this.paintDetailHighlights(pageNumber, detail);
+		detail.highlightDrafting = drafting;
+	}
+
+	private paintDetailHighlights(pageNumber: number, detail: PageDetail): void {
+		// The page's highlight layer is made on the first highlight, which can
+		// be after this region was: the hole cut in the stretched copy, so the
+		// sharp copy is not multiplied in twice, is made here as well.
+		// Placed every time: the region moves as the page scrolls.
+		const stretched = detail.pdf?.parentElement?.querySelector<HTMLElement>('.inkling-annotation-highlight');
+		if (stretched) {
+			stretched.setCssProps(this.detailPlace(detail));
+			stretched.classList.add('has-detail-hole');
+		}
+		this.paintDetailLayer(pageNumber, detail, detail.highlight, (ctx) => this.controller.drawHighlightsTo(pageNumber, ctx));
+	}
+
+	private paintDetailLayer(
+		pageNumber: number,
+		detail: PageDetail,
+		canvas: HTMLCanvasElement | null,
+		draw: (ctx: CanvasRenderingContext2D) => void,
+	): void {
 		const viewport = this.viewports.get(pageNumber);
 		const ctx = canvas?.getContext('2d');
-		if (!detail || !canvas || !viewport || !ctx) return;
+		if (!canvas || !viewport || !ctx) return;
 		ctx.setTransform(1, 0, 0, 1, 0, 0);
 		ctx.clearRect(0, 0, canvas.width, canvas.height);
 		// The page's canvas space onto this region of the sharp copy. Worked
@@ -2031,8 +2163,7 @@ export class PdfAnnotateView extends FileView {
 		// the region was drawn, since sharpening the page re-backs it.
 		const scale = detail.pageWidth / viewport.width;
 		ctx.setTransform(scale, 0, 0, scale, -detail.offsetX, -detail.offsetY);
-		if (layer === 'ink') this.controller.drawInkTo(pageNumber, ctx);
-		else this.controller.drawOverlayTo(pageNumber, ctx);
+		draw(ctx);
 	}
 
 	// ---- Infinite canvas ----
@@ -2146,15 +2277,29 @@ export class PdfAnnotateView extends FileView {
 
 		this.growing = true;
 		const token = this.renderToken;
+		// Whether the file grew but the screen did not catch up with it.
+		let unshown = false;
 		try {
 			const opened = await this.writeGrownBox(file, growth.box, token);
 			if (!opened || token !== this.renderToken) return;
-			await this.showGrownPage(opened, growth, token);
+			try {
+				await this.showGrownPage(opened, growth, token);
+			} catch (error) {
+				unshown = true;
+				throw error;
+			}
 		} catch (error) {
 			console.error('Inkling: failed to grow the canvas.', error);
-			new Notice('Inkling: could not make this canvas larger.');
+			if (!unshown) new Notice('Inkling: could not make this canvas larger.');
 		} finally {
 			this.growing = false;
+		}
+		// The file and its writer have the grown page, the screen the old
+		// one: ink still saves right (a growth leaves PDF space alone), but
+		// the page shown is not the page there is. Reloaded, they agree again.
+		if (unshown && token === this.renderToken && file === this.currentFile) {
+			await this.onLoadFile(file);
+			return;
 		}
 		// Ink drawn while the page was growing can have reached the new edge
 		// already.
@@ -2391,12 +2536,48 @@ export class PdfAnnotateView extends FileView {
 	}
 
 	private onFileChanged(file: TFile): void {
-		if (this.ownWrites > 0 || this.isOwnVersion(file)) return;
+		if (this.restoring || this.ownWrites > 0 || this.isOwnVersion(file)) return;
 		if (this.remoteHandle !== null) window.clearTimeout(this.remoteHandle);
 		this.remoteHandle = window.setTimeout(() => {
 			this.remoteHandle = null;
 			void this.pullRemote(file);
 		}, REMOTE_SETTLE_MS);
+	}
+
+	// ---- Restoring an earlier version ----
+	//
+	// For backups.ts. A restore replaces the file on purpose, and is not a
+	// change from another device: merged as one, ink saved here since the
+	// backup would have stayed on screen — and been saved straight back over
+	// the restored file. So: what is drawn and not saved goes into the file
+	// first, and so into the backup of it as it is now; then drawing pauses
+	// and changes to the file are let be until the view has reloaded from
+	// what was restored.
+
+	async prepareForRestore(): Promise<void> {
+		await this.flushAnnotationsIfDirty(this.currentFile);
+		this.restoring = true;
+		if (this.remoteHandle !== null) window.clearTimeout(this.remoteHandle);
+		this.remoteHandle = null;
+		this.controller.setReadOnly(true);
+	}
+
+	// Called whether the restore worked or not: either way, what is on disk
+	// is what is shown from here.
+	async finishRestore(file: TFile): Promise<void> {
+		if (this.remoteHandle !== null) window.clearTimeout(this.remoteHandle);
+		this.remoteHandle = null;
+		while (this.pulling) await this.pulling.catch(() => undefined);
+		this.dirtyPages.clear();
+		if (this.writeDebounceHandle !== null) window.clearTimeout(this.writeDebounceHandle);
+		if (this.maxWaitHandle !== null) window.clearTimeout(this.maxWaitHandle);
+		this.writeDebounceHandle = null;
+		this.maxWaitHandle = null;
+		await this.rememberDisk(file);
+		this.restoring = false;
+		// The reload decides read-only for itself. Another file opened here
+		// meanwhile was decided for when it loaded, and is left as it is.
+		if (this.currentFile?.path === file.path) await this.onLoadFile(file);
 	}
 
 	// Reads another device's save and merges it into this view. One at a
@@ -2411,7 +2592,7 @@ export class PdfAnnotateView extends FileView {
 			// Cleared before the reload, which flushes, and whose flush may
 			// itself need to take in a change: it must not wait on this.
 			if (this.pulling === run) this.pulling = null;
-			if (reload) await this.onLoadFile(file);
+			if (reload && !this.unloading) await this.onLoadFile(file);
 		})().finally(() => {
 			if (this.pulling === run) this.pulling = null;
 		});
@@ -2432,6 +2613,7 @@ export class PdfAnnotateView extends FileView {
 	// each page now is, and the view reloads from it. Before, ink was merged
 	// by page number — onto whichever page now had that number.
 	private async takeInRemote(file: TFile, force: boolean): Promise<boolean> {
+		if (this.restoring) return false;
 		// A rebuild or a growth under way reloads or swaps the page itself,
 		// and between its steps the view's pages, viewports and writer do not
 		// all describe the same file. Asked again once it is done.
@@ -2455,6 +2637,10 @@ export class PdfAnnotateView extends FileView {
 		const slot = this.saving;
 		let reload = false;
 		let pausedInput = false;
+		// A writer opened on their file and not taken on as this view's: ended
+		// on the way out, whichever way out that is — a failure anywhere
+		// between used to leave its worker running for good.
+		let pendingWriter: AnnotationWriterClient | null = null;
 		const unsaved: number[] = [];
 		try {
 			// Looked at again now that nothing of ours is writing: the change
@@ -2465,6 +2651,7 @@ export class PdfAnnotateView extends FileView {
 
 			const bytes = await this.app.vault.readBinary(file);
 			const writer = new AnnotationWriterClient();
+			pendingWriter = writer;
 			let opened: OpenResult;
 			try {
 				opened = await writer.open(bytes.slice(0));
@@ -2579,6 +2766,7 @@ export class PdfAnnotateView extends FileView {
 			this.pageIds = theirIds;
 			this.writer?.terminate();
 			this.writer = writer;
+			pendingWriter = null;
 			this.maxWriteInterval = maxWriteIntervalMs(
 				this.getSettings().saveCadence === 'frequent' ? 0 : bytes.byteLength,
 				opened.incremental && canAppendBinary(this.app.vault),
@@ -2601,6 +2789,7 @@ export class PdfAnnotateView extends FileView {
 		} catch (error) {
 			console.error('Inkling: failed to take in a change from another device.', error);
 		} finally {
+			pendingWriter?.terminate();
 			release();
 			if (this.saving === slot) this.saving = null;
 			if (pausedInput) this.controller.setReadOnly(false);
@@ -2609,7 +2798,9 @@ export class PdfAnnotateView extends FileView {
 		// Ours that their file does not have yet, on its way to it.
 		for (const pageNumber of unsaved) this.markPageDirty(pageNumber);
 		if (reload && token === this.renderToken) {
-			await this.flushAnnotationsIfDirty(file);
+			// Saved directly: flushAnnotationsIfDirty waits for the pull under
+			// way, which is this one.
+			if (this.dirtyPages.size > 0 || this.saving) await this.flushAnnotations(file);
 			return true;
 		}
 		return false;
@@ -2621,6 +2812,19 @@ export class PdfAnnotateView extends FileView {
 	private pickUpPictureAt(at: Point): boolean {
 		const found = this.pagePointAt(at);
 		return found ? this.controller.pickUpPictureAt(found.pageNumber, found.point) : false;
+	}
+
+	private offerPasteAt(at: Point): boolean {
+		const found = this.pagePointAt(at);
+		return found ? this.controller.offerPasteAt(found.pageNumber, found.point) : false;
+	}
+
+	// Ctrl/Cmd+V: where the pen or mouse is over a page, or else the middle
+	// of what is on screen.
+	private pasteFromKeyboard(): boolean {
+		if (this.controller.isReadOnly() || !this.controller.hasCopied()) return false;
+		const at = this.controller.pointerPosition() ?? this.pagePointAt(this.viewCentre());
+		return at ? this.controller.pasteAt(at.pageNumber, at.point) : false;
 	}
 
 	// A finger's tap anywhere in the view: on a page, the page has it (see
@@ -2834,15 +3038,15 @@ export class PdfAnnotateView extends FileView {
 		const results = panel.createDiv({ cls: 'inkling-nav-results' });
 
 		// Searches as it is typed, once typing pauses, and at once on Enter.
-		let typing: number | null = null;
+		// The pause is the view's, so closing the document cancels it.
 		const search = () => {
-			if (typing !== null) window.clearTimeout(typing);
-			typing = null;
+			if (this.navSearchHandle !== null) window.clearTimeout(this.navSearchHandle);
+			this.navSearchHandle = null;
 			void this.runFind(input.value, status, results);
 		};
 		input.addEventListener('input', () => {
-			if (typing !== null) window.clearTimeout(typing);
-			typing = window.setTimeout(search, FIND_AS_YOU_TYPE_MS);
+			if (this.navSearchHandle !== null) window.clearTimeout(this.navSearchHandle);
+			this.navSearchHandle = window.setTimeout(search, FIND_AS_YOU_TYPE_MS);
 		});
 		panel.addEventListener('keydown', (event: KeyboardEvent) => {
 			// Kept in here: the view's own keys are tool shortcuts.
@@ -3111,7 +3315,7 @@ export class PdfAnnotateView extends FileView {
 	private applyInversion(): void {
 		const setting = this.getSettings().darkInversion;
 		const inverted =
-			this.sessionInversion ?? (setting === 'on' || (setting === 'follow-theme' && document.body.hasClass('theme-dark')));
+			this.sessionInversion ?? (setting === 'on' || (setting === 'follow-theme' && this.isDarkTheme()));
 		this.contentEl.toggleClass('is-inverted', inverted);
 		this.controller.refreshUi();
 	}
@@ -3122,9 +3326,15 @@ export class PdfAnnotateView extends FileView {
 	// different question.
 	toggleInversion(): void {
 		const setting = this.getSettings().darkInversion;
-		const current = setting === 'on' || (setting === 'follow-theme' && document.body.hasClass('theme-dark'));
+		const current = setting === 'on' || (setting === 'follow-theme' && this.isDarkTheme());
 		this.sessionInversion = !(this.sessionInversion ?? current);
 		this.applyInversion();
+	}
+
+	// The theme of the window this view is in: a popout window has a body of
+	// its own, and it is that one Obsidian marks.
+	private isDarkTheme(): boolean {
+		return this.contentEl.ownerDocument.body.classList.contains('theme-dark');
 	}
 
 	isInverted(): boolean {

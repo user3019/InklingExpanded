@@ -48,7 +48,11 @@ function replaceBackground(doc: PDFDocument, page: PDFPage, style: TemplateStyle
 	const read = entries.map((entry) => ({ entry, text: contentText(doc, entry) }));
 
 	let kept = read.filter((stream) => stream.text === null || !isMarkedBackground(stream.text));
-	if (kept.length > 0 && kept.every((stream) => stream.text !== null && isTemplateDrawing(stream.text))) kept = [];
+	// An old, unmarked background: the page's streams all ruling or empty
+	// wrappers, and ruling among them. Anything else on the page keeps every
+	// stream it has, and the new background goes under them.
+	const kinds = kept.map((stream) => (stream.text === null ? 'other' : classifyStream(stream.text)));
+	if (kinds.includes('ruling') && kinds.every((kind) => kind !== 'other')) kept = [];
 
 	const removed = read.filter((stream) => !kept.includes(stream));
 	const operators = backgroundOperators(doc, page, style, infinite);
@@ -99,31 +103,88 @@ const PATH_OPERATORS = new Set([
 	'S', 's', 'f', 'F', 'f*', 'B', 'B*', 'b', 'b*', 'n', 'W', 'W*',
 	'rg', 'RG', 'cs', 'CS', 'scn', 'SCN',
 ]);
+const STROKES = new Set(['S', 's', 'B', 'B*', 'b', 'b*']);
+const FILLS = new Set(['f', 'F', 'f*', 'B', 'B*', 'b', 'b*']);
 const TOKEN = /\/[^\s/[\]()<>{}%]*|\[|\]|[-+]?(?:\d+\.?\d*|\.\d+)|[A-Za-z*'"]+|\S/g;
 
-// Whether a content stream is a background drawn before backgrounds were
-// marked: only paths, painted only in the ruling's colours or with the
-// infinite canvas's pattern. A diagram on an imported page is paths too,
-// but not in exactly those two colours.
-export function isTemplateDrawing(text: string): boolean {
+// What a content stream draws, for telling an old background from the rest:
+// `ruling` paints only in the ruling's colours or with the infinite canvas's
+// pattern, `nothing` paints nothing at all (pdf-lib wraps what it draws in
+// streams of a lone q and Q), `other` is anything else — text, a picture,
+// or a path in any other colour. Black counts as another colour, and is
+// what a path is painted in when no colour was set: a diagram on an
+// imported page is paths too, often with no colour of its own, and was
+// taken for a background and deleted.
+//
+// The colours are followed as a PDF reader follows them — through q and Q,
+// for strokes and fills apart — so a ruled line beside a black one is not
+// mistaken for ruling either.
+export type StreamKind = 'ruling' | 'nothing' | 'other';
+
+export function classifyStream(text: string): StreamKind {
+	interface Paint {
+		stroke: boolean;
+		fill: boolean;
+	}
+	// Whether the current stroke and fill colours are the ruling's own.
+	let paint: Paint = { stroke: false, fill: false };
+	const saved: Paint[] = [];
 	const operands: string[] = [];
+	let painted = false;
 	for (const token of text.match(TOKEN) ?? []) {
 		if (token.startsWith('/') || token === '[' || token === ']' || /^[-+.\d]/.test(token)) {
 			operands.push(token);
 			continue;
 		}
-		if (!PATH_OPERATORS.has(token)) return false;
-		if (token === 'rg' || token === 'RG') {
-			const [r, g, b] = operands.slice(-3).map(Number);
-			if (!TEMPLATE_COLORS.some(([tr, tg, tb]) => near(r, tr) && near(g, tg) && near(b, tb))) return false;
-		} else if (token === 'cs' || token === 'CS') {
-			if (operands[operands.length - 1] !== '/Pattern') return false;
-		} else if (token === 'scn' || token === 'SCN') {
-			if (operands[operands.length - 1] !== `/${BACKGROUND_PATTERN_NAME}`) return false;
+		if (!PATH_OPERATORS.has(token)) return 'other';
+		const last = operands[operands.length - 1];
+		switch (token) {
+			case 'q':
+				saved.push({ ...paint });
+				break;
+			case 'Q':
+				paint = saved.pop() ?? { stroke: false, fill: false };
+				break;
+			case 'rg':
+			case 'RG': {
+				const [r, g, b] = operands.slice(-3).map(Number);
+				const ruled = TEMPLATE_COLORS.some(([tr, tg, tb]) => near(r, tr) && near(g, tg) && near(b, tb));
+				if (token === 'rg') paint.fill = ruled;
+				else paint.stroke = ruled;
+				break;
+			}
+			// A colour space is chosen before its colour: only the pattern's
+			// is ever the ruling's, and its colour comes with scn.
+			case 'cs':
+				paint.fill = false;
+				if (last !== '/Pattern') return 'other';
+				break;
+			case 'CS':
+				paint.stroke = false;
+				if (last !== '/Pattern') return 'other';
+				break;
+			case 'scn':
+				paint.fill = last === `/${BACKGROUND_PATTERN_NAME}`;
+				if (!paint.fill) return 'other';
+				break;
+			case 'SCN':
+				paint.stroke = last === `/${BACKGROUND_PATTERN_NAME}`;
+				if (!paint.stroke) return 'other';
+				break;
+			default:
+				if ((STROKES.has(token) && !paint.stroke) || (FILLS.has(token) && !paint.fill)) return 'other';
+				if (STROKES.has(token) || FILLS.has(token)) painted = true;
 		}
 		operands.length = 0;
 	}
-	return true;
+	return painted ? 'ruling' : 'nothing';
+}
+
+// Whether a content stream is a background drawn before backgrounds were
+// marked: paths painted only in the ruling's colours or with the infinite
+// canvas's pattern, and something painted at all.
+export function isTemplateDrawing(text: string): boolean {
+	return classifyStream(text) === 'ruling';
 }
 
 function near(value: number | undefined, target: number): boolean {

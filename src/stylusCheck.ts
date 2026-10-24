@@ -16,7 +16,8 @@ function sideButton(event: PointerEvent): boolean {
 	return (event.buttons & 1) !== 0 && !(event.pressure > 0);
 }
 
-export function startStylusCheck(win: Window): void {
+// Returns what stops it — also what tapping the message does.
+export function startStylusCheck(win: Window): () => void {
 	const notice = new Notice('', 0);
 	const show = (lines: string[]) => notice.setMessage(lines.join('\n'));
 	show([
@@ -57,7 +58,11 @@ export function startStylusCheck(win: Window): void {
 			]);
 		});
 	};
+	let stopped = false;
 	const stop = () => {
+		if (stopped) return;
+		stopped = true;
+		notice.containerEl.removeEventListener('click', stop);
 		win.removeEventListener('pointerdown', onPointer, true);
 		win.removeEventListener('pointermove', onPointer, true);
 		win.removeEventListener('pointerup', onPointer, true);
@@ -69,4 +74,9 @@ export function startStylusCheck(win: Window): void {
 	win.addEventListener('pointermove', onPointer, true);
 	win.addEventListener('pointerup', onPointer, true);
 	win.addEventListener('pointercancel', onPointer, true);
+	// A tap on the message closes it, and stops this at once rather than at
+	// the next pointer event — of which there may be none for a while, with
+	// every one in the window listened to until then.
+	notice.containerEl.addEventListener('click', stop);
+	return stop;
 }

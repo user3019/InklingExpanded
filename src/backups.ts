@@ -1,5 +1,5 @@
 import { App, FuzzySuggestModal, normalizePath, Notice, TFile } from 'obsidian';
-import { refreshCoreReaders } from './coreViews';
+import { annotateViewsOf, refreshCoreReaders } from './coreViews';
 import { writeBinarySafely } from './vaultWrite';
 
 // A copy of a PDF from just before this plugin rebuilt it — added or
@@ -70,7 +70,10 @@ export async function listBackups(app: App, file: TFile): Promise<Backup[]> {
 	if (!(await adapter.exists(folder))) return [];
 	const prefix = `${keyFor(file)}@`;
 	const backups: Backup[] = [];
-	for (const path of (await adapter.list(folder)).files) {
+	for (const listed of (await adapter.list(folder)).files) {
+		// Forward slashes whatever the system: a listing is not promised to
+		// use them, and a backslash would leave the whole path as the name.
+		const path = normalizePath(listed.replace(/\\/g, '/'));
 		const name = path.slice(path.lastIndexOf('/') + 1);
 		if (!name.startsWith(prefix) || !name.endsWith('.pdf')) continue;
 		const [stamp = '', reason = ''] = name.slice(prefix.length, -'.pdf'.length).split('@');
@@ -90,19 +93,29 @@ export function describeBackup(backup: Backup): string {
 // Puts a backup back in place of the note, keeping the note as it is now as
 // a backup of its own first — so a restore is never the step that loses
 // something either.
+//
+// A note open to annotate is told first (see prepareForRestore in
+// pdfView.ts): its unsaved ink goes into that backup, and the file being
+// replaced is not merged in as another device's change — which would have
+// kept ink from after the backup on screen and saved it straight back.
 export async function restoreBackup(app: App, file: TFile, backup: Backup): Promise<boolean> {
+	const views = annotateViewsOf(app, file);
+	let restored = false;
 	try {
+		for (const view of views) await view.prepareForRestore();
 		const bytes = await app.vault.adapter.readBinary(backup.path);
 		await backUp(app, file, await app.vault.readBinary(file), 'restore');
 		await writeBinarySafely(app.vault, file, bytes);
-		await refreshCoreReaders(app, file);
-		new Notice(`Inkling: “${file.basename}” is back as it was ${describeBackup(backup).replace(' — ', ', ')}.`);
-		return true;
+		restored = true;
 	} catch (error) {
 		console.error('Inkling: could not restore a backup.', error);
-		new Notice('Inkling: could not restore that version.');
-		return false;
+	} finally {
+		for (const view of views) await view.finishRestore(file);
 	}
+	await refreshCoreReaders(app, file);
+	if (restored) new Notice(`Inkling: “${file.basename}” is back as it was ${describeBackup(backup).replace(' — ', ', ')}.`);
+	else new Notice('Inkling: could not restore that version.');
+	return restored;
 }
 
 export class BackupModal extends FuzzySuggestModal<Backup> {

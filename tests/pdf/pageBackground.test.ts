@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { decodePDFRawStream, PDFArray, PDFDocument, PDFName, PDFRawStream, PDFRef, StandardFonts } from 'pdf-lib';
-import { isTemplateDrawing, setPageBackground } from '../../src/pdf/pageBackground';
+import { classifyStream, isTemplateDrawing, setPageBackground } from '../../src/pdf/pageBackground';
 import { createHandwrittenNoteBytes, readTemplateStyle } from '../../src/templates';
 import { isInfiniteCanvasKeywords } from '../../src/pdf/infiniteCanvas';
 import { shownMenus } from '../harness/obsidian';
@@ -71,6 +71,20 @@ describe('changing a page’s background', () => {
 		expect(contents.join('')).toContain('Tj');
 	});
 
+	it('keeps a black line drawing on an imported page, and puts the ruling under it', async () => {
+		const doc = await PDFDocument.create();
+		doc.setKeywords(['inkling:template=blank']);
+		const page = doc.addPage();
+		// Drawn with no colour of its own, as many PDFs draw their diagrams.
+		const diagram = doc.context.flateStream('q 2 w 100 100 m 300 300 l S 100 300 m 300 100 l S Q');
+		page.node.set(PDFName.of('Contents'), doc.context.register(diagram));
+		const lined = await changed(await doc.save(), 1, 'lined');
+		const contents = await contentsOf(lined, 1);
+		expect(contents).toHaveLength(2);
+		expect(contents[0]).toContain('/InklingBackground BMC');
+		expect(contents[1]).toContain('100 100 m 300 300 l S');
+	});
+
 	it('changes only the page asked for, or every page', async () => {
 		const doc = await PDFDocument.load(await createHandwrittenNoteBytes('lined'));
 		doc.addPage();
@@ -109,6 +123,26 @@ describe('recognising an old background', () => {
 	it('takes paths in the ruling’s colours for one', () => {
 		expect(isTemplateDrawing('q 0.7 0.78 0.92 RG 0.75 w 0 768 m 612 768 l S Q')).toBe(true);
 		expect(isTemplateDrawing('q /Pattern cs /InklingBackground scn -1 -1 2 2 re f Q')).toBe(true);
+	});
+
+	it('does not take paths in no colour of their own — black — for one', () => {
+		// A diagram on an imported page: lines with no colour set are black.
+		expect(isTemplateDrawing('q 1 w 0 0 m 100 100 l S Q')).toBe(false);
+		expect(isTemplateDrawing('0 0 100 50 re f')).toBe(false);
+	});
+
+	it('does not take a ruled line beside a black one for one', () => {
+		expect(isTemplateDrawing('0 0 m 10 0 l S 0.7 0.78 0.92 RG 0 24 m 612 24 l S')).toBe(false);
+		// Black again after the ruling's colour is restored away with Q.
+		expect(isTemplateDrawing('q 0.7 0.78 0.92 RG 0 24 m 612 24 l S Q 0 48 m 612 48 l S')).toBe(false);
+		// A fill in black under a ruling's stroke colour.
+		expect(isTemplateDrawing('0.7 0.78 0.92 RG 0 0 10 10 re f')).toBe(false);
+	});
+
+	it('takes a stream that paints nothing for nothing', () => {
+		expect(classifyStream('q')).toBe('nothing');
+		expect(classifyStream('Q')).toBe('nothing');
+		expect(classifyStream('q 0.7 0.78 0.92 RG 0 24 m 612 24 l S Q')).toBe('ruling');
 	});
 
 	it('does not take a diagram, text or a picture for one', () => {

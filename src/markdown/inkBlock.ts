@@ -5,6 +5,7 @@ import {
 	capturePointer,
 	findScrollParent,
 	HistoryStack,
+	releasePointer,
 	scaleAnnotationUniform,
 	ToolState,
 	type Annotation,
@@ -875,6 +876,7 @@ class InkBlockView implements StorageHost {
 
 		const end = (event: PointerEvent) => {
 			if (!drag || event.pointerId !== drag.pointerId) return;
+			releasePointer(handle, event.pointerId);
 			drag = null;
 			if (frame !== null) {
 				window.cancelAnimationFrame(frame);

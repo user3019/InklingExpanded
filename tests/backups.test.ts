@@ -64,6 +64,17 @@ describe('backups of a note', () => {
 		expect(backups[4]?.time.toISOString()).toBe('2026-10-22T10:02:00.000Z');
 	});
 
+	it('finds them in a listing with backslashes, as a Windows path may come', async () => {
+		const { vault, files } = memoryVault(await createHandwrittenNoteBytes('lined'));
+		const app = { vault, workspace: { getLeavesOfType: () => [] } } as never;
+		await backUp(app, file, await vault.readBinary(), 'add-page');
+		vault.adapter.list = vi.fn(async () => ({ files: [...files.keys()].map((path) => path.replace(/\//g, '\\')), folders: [] }));
+		const backups = await listBackups(app, file);
+		expect(backups).toHaveLength(1);
+		expect(backups[0]?.reason).toBe('add-page');
+		expect(files.has(backups[0]?.path ?? '')).toBe(true);
+	});
+
 	it('restores one, keeping the note as it is now as a backup too', async () => {
 		const one = await createHandwrittenNoteBytes('lined');
 		const { vault, onDisk } = memoryVault(one);

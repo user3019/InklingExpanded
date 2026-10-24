@@ -24,12 +24,27 @@
 // worth pinning.
 export const notices: string[] = [];
 
+// The last few made, for a test that works the message itself.
+export const noticeInstances: Notice[] = [];
+
 export class Notice {
+	// As Obsidian builds one: the notice, with its message inside it.
+	readonly containerEl = document.createElement('div');
+	readonly messageEl = this.containerEl.appendChild(document.createElement('div'));
+	hidden = false;
 	constructor(public readonly message: string) {
 		notices.push(message);
+		noticeInstances.push(this);
+		this.messageEl.textContent = message;
+		document.body.appendChild(this.containerEl);
+	}
+	setMessage(message: string): this {
+		this.messageEl.textContent = message;
+		return this;
 	}
 	hide(): void {
-		// Nothing to hide in a test; kept so production code can call it.
+		this.hidden = true;
+		this.containerEl.remove();
 	}
 }
 
@@ -326,6 +341,7 @@ export function normalizePath(path: string): string {
 
 export function resetObsidianStubs(): void {
 	notices.length = 0;
+	noticeInstances.length = 0;
 	openedModals.length = 0;
 	shownMenus.length = 0;
 	iconRequests.length = 0;

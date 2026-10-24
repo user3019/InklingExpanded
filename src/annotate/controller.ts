@@ -19,15 +19,17 @@ import { prepareStroke } from './stroke';
 import {
 	cropButtonAt,
 	cropHandleAt,
+	drawHighlights,
 	drawInk,
 	drawOverlay,
 	handleAt,
 	isHighlight,
 	onPictureDecoded,
-	pictureButtonAt,
+	pasteButtonAt,
 	renderBase,
 	renderHighlights,
 	renderOverlay,
+	selectionButtonAt,
 	selectionFrame,
 	type CropHandle,
 	type HandleName,
@@ -108,6 +110,22 @@ type PenButtons =
 	| { kind: 'free' }
 	| { kind: 'unknown' };
 
+
+// What was last copied, shared by every surface this plugin draws on — so
+// writing copied in one PDF can be pasted on another page, into another
+// PDF, or into a note's ink block. `unit` is the copying page's canvas
+// pixels per page unit (see AnnotationControllerOptions.getUnitScale), which
+// is what lets a copy land the same size wherever it is pasted.
+let clipboard: { annotations: Annotation[]; unit: number } | null = null;
+// The first copy of a session says how to paste; later ones only that they
+// copied.
+let pasteHintShown = false;
+
+// Forgets what was copied — as a new session starts out. For tests, which
+// share one module, and so one clipboard, between them.
+export function forgetCopied(): void {
+	clipboard = null;
+}
 
 type DragMode =
 	| { kind: 'draw'; tool: DrawToolType; points: Point[]; lastMovedAt: number }
@@ -255,6 +273,10 @@ export interface AnnotationControllerOptions {
 	// What the side button of a stylus does while held (see the setting).
 	// Omitted, it erases.
 	getPenButtonAction?: () => 'eraser' | 'highlighter' | 'select' | 'none';
+	// A page's canvas pixels per unit of the page itself — PDF points, in the
+	// PDF view. Omitted, 1: an ink block's canvas is its own unit. Copying
+	// and pasting between pages shown at different sizes goes through it.
+	getUnitScale?: (pageNumber: number) => number;
 	// Told whenever a page's ink, or its live layer (the stroke being drawn,
 	// a lasso, a selection), has been painted again. The PDF view draws both
 	// a second time, magnified, wherever it is zoomed in past what a whole
@@ -292,6 +314,11 @@ export class AnnotationController {
 	// A picture being cropped: where it is on its page, and the part of it
 	// that is to stay. See startCrop.
 	private cropping: { pageNumber: number; id: string; picture: Rect; rect: Rect } | null = null;
+	// A paste on offer, where a press was held (see offerPasteAt).
+	private pasteOffer: { pageNumber: number; at: Point } | null = null;
+	// Where a pen or mouse last was over a page, for a paste from the
+	// keyboard.
+	private lastPointer: { pageNumber: number; point: Point } | null = null;
 	// A press on a picture that may yet turn into picking it up. See
 	// LONG_PRESS_MS.
 	private longPress: { pageNumber: number; at: Point; timer: number } | null = null;
@@ -503,6 +530,7 @@ export class AnnotationController {
 		const mount = this.pages.get(pageNumber);
 		if (!mount) return;
 		if (this.catcher?.pageNumber === pageNumber) this.hideCatcher();
+		if (this.pasteOffer?.pageNumber === pageNumber) this.pasteOffer = null;
 		mount.detach();
 		mount.base.canvas.remove();
 		mount.overlayCanvas.remove();
@@ -624,7 +652,10 @@ export class AnnotationController {
 	setReadOnly(readOnly: boolean): void {
 		if (readOnly === this.readOnly) return;
 		// Before, so an erase it was carrying still lands.
-		if (readOnly) this.hideCatcher();
+		if (readOnly) {
+			this.hideCatcher();
+			this.pasteOffer = null;
+		}
 		this.readOnly = readOnly;
 		if (readOnly) {
 			// Nothing selected can be acted on any more, and a half-finished
@@ -858,6 +889,8 @@ export class AnnotationController {
 	}
 
 	private handleHover(pageNumber: number, point: Point | null): void {
+		if (point) this.lastPointer = { pageNumber, point };
+		else if (this.lastPointer?.pageNumber === pageNumber) this.lastPointer = null;
 		if (this.readOnly) return;
 		const wasShowing = this.eraserCursor?.pageNumber === pageNumber;
 		if (this.getTool() !== 'eraser' || !point) {
@@ -881,6 +914,17 @@ export class AnnotationController {
 				return;
 			}
 			void this.applyCrop();
+		}
+		this.lastPointer = { pageNumber, point };
+		// A paste on offer is taken by a press on its button, and let go of by
+		// a press anywhere else — which then does what it would have.
+		if (this.pasteOffer) {
+			const offer = this.pasteOffer;
+			if (offer.pageNumber === pageNumber && pasteButtonAt(offer.at, this.chromeScale(pageNumber), point)) {
+				this.pasteAt(pageNumber, offer.at);
+				return;
+			}
+			this.withdrawPasteOffer();
 		}
 		// Bound once so the switch below narrows it — a getter call in each
 		// case would be opaque to the narrowing and force a cast.
@@ -923,6 +967,9 @@ export class AnnotationController {
 	// touch — its frame, its handles, a picture's buttons — works it, as a pen
 	// would.
 	private claimsTouch(pageNumber: number, point: Point): boolean {
+		// A finger takes a paste on offer as a pen does.
+		const offer = this.pasteOffer;
+		if (offer?.pageNumber === pageNumber && pasteButtonAt(offer.at, this.chromeScale(pageNumber), point)) return true;
 		// A finger works a crop's grips and buttons as a pen does — and a
 		// press beside it is the finger's to scroll with, or to tap done.
 		const crop = this.cropping;
@@ -935,8 +982,7 @@ export class AnnotationController {
 		if (selected.length === 0) return false;
 		const box = unionBoundingBox(selected.map(boundingBox));
 		const chrome = this.chromeScale(pageNumber);
-		const [only] = selected;
-		if (selected.length === 1 && only?.kind === 'image' && pictureButtonAt(box, chrome, point)) return true;
+		if (selectionButtonAt(box, chrome, point, selected)) return true;
 		// A locked picture does not move, so a finger on it scrolls.
 		if (selected.some(isLockedPicture)) return false;
 		if (handleAt(box, chrome, point)) return true;
@@ -945,6 +991,10 @@ export class AnnotationController {
 
 	// Lets go of whatever is selected — a tap beside it, or Escape.
 	clearSelection(): boolean {
+		if (this.pasteOffer) {
+			this.withdrawPasteOffer();
+			return true;
+		}
 		// Escape while cropping leaves the picture as it was, and selected.
 		if (this.cropping) {
 			this.cancelCrop();
@@ -970,6 +1020,14 @@ export class AnnotationController {
 	// nothing selected, it picks out the drawing under it, as a pen's tap does.
 	touchTap(pageNumber: number, point: Point): void {
 		if (this.readOnly) return;
+		if (this.pasteOffer) {
+			const offer = this.pasteOffer;
+			if (offer.pageNumber === pageNumber && pasteButtonAt(offer.at, this.chromeScale(pageNumber), point)) {
+				this.pasteAt(pageNumber, offer.at);
+				return;
+			}
+			this.withdrawPasteOffer();
+		}
 		// A tap beside a crop is done with it.
 		if (this.cropping) {
 			const chrome = this.chromeScale(this.cropping.pageNumber);
@@ -1220,10 +1278,10 @@ export class AnnotationController {
 				return;
 			case 'hover-free':
 				this.hideCatcher();
-				this.putBackButtonTool(pageNumber);
+				this.putBackButtonTool(pageNumber, point);
 				return;
 			case 'free':
-				this.putBackButtonTool(pageNumber);
+				this.putBackButtonTool(pageNumber, event.type === 'pointerleave' ? null : point);
 				return;
 			case 'held':
 				break;
@@ -1292,7 +1350,7 @@ export class AnnotationController {
 				// tool's own.
 				if (event.type === 'pointerdown' && event.pressure > 0) {
 					this.hideCatcher();
-					this.putBackButtonTool(pageNumber);
+					this.putBackButtonTool(pageNumber, point);
 					return;
 				}
 				this.followPenButtons(pageNumber, point, event);
@@ -1342,12 +1400,15 @@ export class AnnotationController {
 		this.notify();
 	}
 
-	private putBackButtonTool(pageNumber: number): void {
+	// `at` is where the pen is, when it is over the page: the tool put back
+	// shows its cursor there at once — the eraser's ring, if that is the one
+	// in hand again — rather than only once the pen next moves.
+	private putBackButtonTool(pageNumber: number, at: Point | null = null): void {
 		if (this.toolUnderButton === null || this.drag) return;
 		const tool = this.toolUnderButton;
 		this.toolUnderButton = null;
 		this.setTool(tool);
-		this.handleHover(pageNumber, null);
+		this.handleHover(pageNumber, at);
 	}
 
 	// Drops the gesture under way without committing any of it — a finger
@@ -1383,7 +1444,11 @@ export class AnnotationController {
 			if (boxes.length > 0) {
 				const box = unionBoundingBox(boxes);
 				const chrome = this.chromeScale(pageNumber);
-				const button = selected.length === 1 && only?.kind === 'image' ? pictureButtonAt(box, chrome, point) : null;
+				const button = selectionButtonAt(box, chrome, point, selected);
+				if (button === 'copy') {
+					this.copySelection();
+					return;
+				}
 				if (button === 'lock' && only) {
 					this.toggleLock(pageNumber, only.id);
 					return;
@@ -1438,7 +1503,121 @@ export class AnnotationController {
 		// decided when it lifts (see handleEnd).
 		this.selection = { pageNumber, ids: new Set() };
 		this.drag = { pageNumber, mode: { kind: 'lasso', points: [point] } };
+		this.watchForPasteHold(pageNumber, point);
 		this.notify();
+	}
+
+	// ---- Copy and paste ----
+	//
+	// A selection's bar has a copy button; Ctrl/Cmd+C does the same, and X
+	// cuts. To paste, the lasso is held still on the spot — pen or finger —
+	// and a paste button comes up there; Ctrl/Cmd+V pastes where the pointer
+	// is. A paste is new ink, one step of undo, and comes selected, to be
+	// moved or sized into place.
+
+	hasCopied(): boolean {
+		return clipboard !== null;
+	}
+
+	copySelection(): boolean {
+		const { pageNumber, ids } = this.selection;
+		if (ids.size === 0) return false;
+		const selected = this.store.getPage(pageNumber).filter((a) => ids.has(a.id));
+		if (selected.length === 0) return false;
+		clipboard = { annotations: selected, unit: this.unitScale(pageNumber) };
+		if (pasteHintShown) new Notice('Copied.', 1500);
+		else {
+			pasteHintShown = true;
+			new Notice('Copied. To paste, hold the lasso on the spot it should go — or press Ctrl+V — and tap the paste button.', 6000);
+		}
+		this.notify();
+		return true;
+	}
+
+	cutSelection(): boolean {
+		if (this.readOnly || !this.copySelection()) return false;
+		this.deleteSelection();
+		return true;
+	}
+
+	// Offers a paste at a spot: a button there, which pastes when pressed.
+	offerPasteAt(pageNumber: number, point: Point): boolean {
+		if (this.readOnly || !clipboard || !this.pages.has(pageNumber)) return false;
+		const previous = this.pasteOffer?.pageNumber;
+		this.pasteOffer = { pageNumber, at: point };
+		if (previous !== undefined && previous !== pageNumber) this.redrawOverlay(previous);
+		this.redrawOverlay(pageNumber);
+		return true;
+	}
+
+	private withdrawPasteOffer(): void {
+		const offer = this.pasteOffer;
+		if (!offer) return;
+		this.pasteOffer = null;
+		this.redrawOverlay(offer.pageNumber);
+	}
+
+	// Where a pen or mouse is over a page, if it is — for a paste from the
+	// keyboard.
+	pointerPosition(): { pageNumber: number; point: Point } | null {
+		const at = this.lastPointer;
+		return at && this.pages.has(at.pageNumber) ? at : null;
+	}
+
+	// The copy, centred on `point` and kept on the page: new ids, the size
+	// it had where it was copied, unlocked, and selected.
+	pasteAt(pageNumber: number, point: Point): boolean {
+		const copied = clipboard;
+		const mount = this.pages.get(pageNumber);
+		if (this.readOnly || !copied || !mount) return false;
+		this.withdrawPasteOffer();
+		const factor = this.unitScale(pageNumber) / copied.unit;
+		const origin = { x: 0, y: 0 };
+		const sized = copied.annotations.map((a) => (factor === 1 ? a : scaleAnnotationAbout(a, origin, factor)));
+		const box = unionBoundingBox(sized.map(boundingBox));
+		const width = box.maxX - box.minX;
+		const height = box.maxY - box.minY;
+		// Centred where asked, then moved back onto the page — to its top or
+		// left edge if it is larger than the page.
+		const keep = (start: number, size: number, room: number) => Math.max(0, Math.min(start, room - size));
+		const left = keep(point.x - width / 2, width, mount.width);
+		const top = keep(point.y - height / 2, height, mount.height);
+		const pasted = sized.map((a) => {
+			const moved = translateAnnotation(a, left - box.minX, top - box.minY);
+			return moved.kind === 'image' ? { ...moved, id: createId(), locked: false } : { ...moved, id: createId() };
+		});
+		this.cancelLongPress();
+		this.drag = null;
+		const previous = this.getTool();
+		this.setTool('select');
+		if (previous !== 'select') this.toolBeforePickUp ??= previous;
+		this.commitNew(pageNumber, pasted);
+		this.selection = { pageNumber, ids: new Set(pasted.map((a) => a.id)) };
+		this.redrawOverlay(pageNumber);
+		this.notify();
+		return true;
+	}
+
+	private unitScale(pageNumber: number): number {
+		const scale = this.options.getUnitScale?.(pageNumber) ?? 1;
+		return Number.isFinite(scale) && scale > 0 ? scale : 1;
+	}
+
+	// The lasso held still where it came down, with something copied: not a
+	// loop after all, but a paste being asked for there.
+	private watchForPasteHold(pageNumber: number, point: Point): void {
+		if (!clipboard || this.readOnly) return;
+		this.cancelLongPress();
+		const timer = window.setTimeout(() => {
+			this.longPress = null;
+			const drag = this.drag;
+			if (drag?.pageNumber !== pageNumber || drag.mode.kind !== 'lasso') return;
+			this.drag = null;
+			this.selection = { pageNumber: -1, ids: new Set() };
+			this.offerPasteAt(pageNumber, point);
+			this.notify();
+		}, LONG_PRESS_MS);
+		this.longPress = { pageNumber, at: point, timer };
 	}
 
 	// Keeps a drawn point inside the page it is being drawn on.
@@ -1990,7 +2169,12 @@ export class AnnotationController {
 		// read rather than drawn on reaches here on every mount and would
 		// otherwise pay for a full-size canvas to clear it and stop.
 		const empty =
-			!options.draft && !options.lassoPath && !options.eraserCursor && !options.crop && (!options.selected || options.selected.length === 0);
+			!options.draft &&
+			!options.lassoPath &&
+			!options.eraserCursor &&
+			!options.crop &&
+			!options.pasteAt &&
+			(!options.selected || options.selected.length === 0);
 		if (empty && !mount.overlay) {
 			this.options.onPageRepainted?.(pageNumber, 'overlay');
 			return;
@@ -2026,8 +2210,12 @@ export class AnnotationController {
 			if (this.store.getPage(pageNumber).some((a) => a.id === id && a.kind === 'image')) crop = { picture: this.cropping.picture, rect: this.cropping.rect };
 			else this.cropping = null;
 		}
-		const chrome = selected || lassoPath || crop ? this.chromeScale(pageNumber) : 1;
-		return { options: { selected: crop ? undefined : selected, draft: overlayDraft, lassoPath, eraserCursor, crop, chrome }, highlightDraft };
+		const pasteAt = this.pasteOffer?.pageNumber === pageNumber ? this.pasteOffer.at : null;
+		const chrome = selected || lassoPath || crop || pasteAt ? this.chromeScale(pageNumber) : 1;
+		return {
+			options: { selected: crop ? undefined : selected, draft: overlayDraft, lassoPath, eraserCursor, crop, pasteAt, chrome },
+			highlightDraft,
+		};
 	}
 
 	// A page's ink, and its live layer, drawn onto someone else's canvas in
@@ -2036,6 +2224,17 @@ export class AnnotationController {
 	// maps that space onto the detail canvas is all the caller supplies.
 	drawInkTo(pageNumber: number, ctx: CanvasRenderingContext2D): void {
 		drawInk(ctx, this.store.getPage(pageNumber));
+	}
+
+	// The highlighter's strokes, the one being drawn included — the layer
+	// the overlay never carries (see redrawHighlightDraft).
+	drawHighlightsTo(pageNumber: number, ctx: CanvasRenderingContext2D): void {
+		drawHighlights(ctx, this.store.getPage(pageNumber), this.overlayFor(pageNumber).highlightDraft);
+	}
+
+	// Whether a highlighter stroke is being drawn on the page right now.
+	hasHighlightDraft(pageNumber: number): boolean {
+		return this.overlayFor(pageNumber).highlightDraft !== null;
 	}
 
 	drawOverlayTo(pageNumber: number, ctx: CanvasRenderingContext2D): void {

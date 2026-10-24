@@ -258,10 +258,19 @@
 	z-index: 2;
 }
 
+/* The sharp highlights: multiplied into the sharp page beneath them exactly
+   as the page's own highlight layer is (see .inkling-annotation-highlight),
+   with the same opacity, set on the canvas from HIGHLIGHTER_OPACITY. */
+.inkling-highlight-detail {
+	mix-blend-mode: multiply;
+	opacity: var(--inkling-highlight-opacity);
+}
+
 /* The stretched ink is cut away where the sharp copy covers it — its soft
    edges would otherwise show round every sharp stroke — and kept everywhere
    else, so a quick scroll past the sharp region still shows ink. */
-.inkling-annotation-base.has-detail-hole {
+.inkling-annotation-base.has-detail-hole,
+.inkling-annotation-highlight.has-detail-hole {
 	clip-path: polygon(
 		evenodd,
 		0 0,
@@ -685,6 +694,13 @@
 .inkling-pdf-view.is-inverted .inkling-annotation-overlay,
 .inkling-pdf-view.is-inverted .inkling-detail-layer {
 	filter: invert(1) hue-rotate(180deg);
+}
+
+/* Not inverted, like the page's own highlight layer: screened instead,
+   which is what keeps a highlight visible on an inverted page. */
+.inkling-pdf-view.is-inverted .inkling-highlight-detail {
+	filter: none;
+	mix-blend-mode: screen;
 }
 
 /* ---------------------------------------------------------------------

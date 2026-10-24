@@ -66,7 +66,12 @@ function eraseFromStroke(stroke: StrokeAnnotation, point: Point, radius: number)
 	});
 	if (currentSegment.length > 0) segments.push(currentSegment);
 
-	return segments
-		.filter((segmentPoints) => segmentPoints.length >= 2)
-		.map((segmentPoints) => ({ ...stroke, id: createId(), points: segmentPoints }));
+	const pieces = segments.filter((segmentPoints) => segmentPoints.length >= 2);
+	// Shortened at an end rather than cut in two: still the same stroke, and
+	// kept under its id, so a merge with another device sees one stroke
+	// changed — not one erased and another drawn. Only the pieces of a cut
+	// stroke are new strokes.
+	const [only] = pieces;
+	if (pieces.length === 1 && only) return [{ ...stroke, points: only }];
+	return pieces.map((segmentPoints) => ({ ...stroke, id: createId(), points: segmentPoints }));
 }

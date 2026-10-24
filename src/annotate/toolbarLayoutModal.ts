@@ -1,5 +1,6 @@
 import { App, Modal, setTooltip } from 'obsidian';
 import { setIconOrText } from '../icon';
+import { capturePointer, releasePointer } from './pointer';
 import {
 	defaultToolbarLayout,
 	moveToolbarItem,
@@ -184,7 +185,7 @@ export class ToolbarLayoutModal extends Modal {
 		const list = this.listEl;
 		if (!row || !list) return;
 		event.preventDefault();
-		handle.setPointerCapture(event.pointerId);
+		capturePointer(handle, event.pointerId);
 
 		const from = this.layout.order.indexOf(id);
 		const first = this.rows.get(this.layout.order[0] as ToolbarItemId);
@@ -262,7 +263,7 @@ export class ToolbarLayoutModal extends Modal {
 		drag.handle.removeEventListener('pointerup', this.onDragEnd);
 		drag.handle.removeEventListener('pointercancel', this.onDragCancel);
 		drag.handle.removeEventListener('lostpointercapture', this.onDragCancel);
-		if (drag.handle.hasPointerCapture(drag.pointerId)) drag.handle.releasePointerCapture(drag.pointerId);
+		releasePointer(drag.handle, drag.pointerId);
 
 		// The slide is over: everything goes straight to its new place, not
 		// animated back from where the shifts had it.
