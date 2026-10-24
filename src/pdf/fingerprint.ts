@@ -10,7 +10,7 @@ import { isInklingAnnotationDict } from './annotationSync';
 // opens, with something quietly missing, discovered months later. This is
 // what makes that failure loud at the moment it happens.
 //
-// Deliberately excluded: Inkling's own annotations, which every save is
+// Deliberately excluded: InklingExpanded's own annotations, which every save is
 // supposed to change. Everything else — page geometry, page content, the
 // resources content refers to, other software's annotations, and the
 // Keywords field carrying a handwritten note's template style — must come
@@ -46,7 +46,7 @@ function streamLength(value: unknown): number {
 // Note on what this can and cannot see: pdf-lib buffers page drawing
 // operations and only materialises them into /Contents when the document is
 // saved, so a page drawn on but not yet saved reports its pre-draw size.
-// That is harmless here because Inkling never draws into a page's content
+// That is harmless here because InklingExpanded never draws into a page's content
 // stream — every mark it makes is an annotation with its own appearance
 // stream — so a content stream that changes at all is a change we did not
 // make, which is exactly what this is watching for.

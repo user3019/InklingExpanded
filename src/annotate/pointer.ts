@@ -140,7 +140,7 @@ export function capturePointer(el: Element, pointerId: number): void {
 		if (pointerCaptureFailureLogged) return;
 		pointerCaptureFailureLogged = true;
 		console.error(
-			'Inkling: setPointerCapture failed; continuing without it. Further failures this session will not be logged.',
+			'InklingExpanded: setPointerCapture failed; continuing without it. Further failures this session will not be logged.',
 			error,
 		);
 	}

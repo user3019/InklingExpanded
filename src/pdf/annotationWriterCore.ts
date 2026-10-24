@@ -24,7 +24,7 @@ export interface OpenedDocument {
 	// saves reuse this parse instead of re-reading the whole file each time.
 	doc: PDFDocument;
 	savedAnnotations: Map<number, Annotation[]>;
-	// What pdf.js should render: the file with only Inkling's own annotations
+	// What pdf.js should render: the file with only InklingExpanded's own annotations
 	// stripped out, so its annotation-baking render still shows annotations
 	// from other PDF software without doubling up with our live overlay.
 	displayBytes: ArrayBuffer;
@@ -85,7 +85,7 @@ export async function openDocument(bytes: ArrayBuffer): Promise<OpenedDocument> 
 	});
 
 	// A second, independent parse of the same bytes — only worth it (and its
-	// own save()) when this file actually has Inkling annotations to strip
+	// own save()) when this file actually has InklingExpanded annotations to strip
 	// out; otherwise the original bytes are already exactly the right display
 	// copy. `bytes` is safe to re-read here since nothing above mutated or
 	// transferred it away — pdf-lib doesn't detach the buffers it parses.

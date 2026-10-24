@@ -1207,11 +1207,11 @@ async function insertInkFileBlock(stores: InkFileStores, editor: Editor, resolve
 	try {
 		path = await resolvePath();
 	} catch {
-		new Notice('Inkling: could not work out where this note’s ink file goes, so no ink block was inserted.');
+		new Notice('InklingExpanded: could not work out where this note’s ink file goes, so no ink block was inserted.');
 		return;
 	}
 	if (!isVaultPath(path)) {
-		new Notice(`Inkling: ${path} is not a place in the vault an ink file can go, so no ink block was inserted. Check where new ink files go in settings.`);
+		new Notice(`InklingExpanded: ${path} is not a place in the vault an ink file can go, so no ink block was inserted. Check where new ink files go in settings.`);
 		return;
 	}
 	const id = createId();
@@ -1220,7 +1220,7 @@ async function insertInkFileBlock(stores: InkFileStores, editor: Editor, resolve
 		await store.load();
 		const outcome = await store.createBlock(id, emptyFileBlock());
 		if (outcome.kind !== 'written') {
-			new Notice(`Inkling: could not add a drawing to ${path}, so no ink block was inserted.`);
+			new Notice(`InklingExpanded: could not add a drawing to ${path}, so no ink block was inserted.`);
 			return;
 		}
 		// Trailing newline so the cursor ends up on a fresh line after the
@@ -1281,7 +1281,7 @@ export function registerInkBlock(plugin: Plugin, toolState: ToolState, options: 
 		editorCallback: (editor, ctx) => {
 			const notePath = ctx.file?.path;
 			if (!notePath) {
-				new Notice('Inkling: this note has no file yet, so there is nowhere to name its ink file.');
+				new Notice('InklingExpanded: this note has no file yet, so there is nowhere to name its ink file.');
 				return;
 			}
 			void insertInkFileBlock(stores, editor, () => options.inkFilePathFor(notePath));

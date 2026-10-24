@@ -89,7 +89,7 @@ describe('scanLastXref', () => {
 
 	it('declines when startxref points at something that is neither', () => {
 		// The failure this whole module exists to catch: a file whose
-		// cross-reference table is already broken opens fine in Inkling today,
+		// cross-reference table is already broken opens fine in InklingExpanded today,
 		// because pdf-lib never consults it. Appending to one produces a file
 		// a stricter reader cannot follow.
 		const head = '%PDF-1.7\n';

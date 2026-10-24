@@ -50,9 +50,9 @@ describe('collectAnnotations', () => {
 	});
 
 	// The other half of the boundary: filtering must not throw away the
-	// annotations extraction exists for, including the subtypes Inkling
+	// annotations extraction exists for, including the subtypes InklingExpanded
 	// itself writes (Ink, Text, Line, Square, Circle — see pdf/annotationSync.ts).
-	it('keeps a square, which is what Inkling writes for a rectangle', async () => {
+	it('keeps a square, which is what InklingExpanded writes for a rectangle', async () => {
 		const found = await collectAnnotations(await pageWithAnnotation('Square'));
 		expect(found).toHaveLength(1);
 		expect(found[0]?.quote).toContain('Setting Up Your Python Environment');
@@ -88,7 +88,7 @@ describe('collectAnnotations', () => {
 	});
 });
 
-describe('collectAnnotations, on Inkling’s own annotations', () => {
+describe('collectAnnotations, on InklingExpanded’s own annotations', () => {
 	async function withInklingAnnotations(annotations: Annotation[], text = true): Promise<ArrayBuffer> {
 		const doc = await PDFDocument.create();
 		const page = doc.addPage([612, 792]);

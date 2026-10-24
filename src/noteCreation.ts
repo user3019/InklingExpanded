@@ -13,7 +13,7 @@ import {
 } from './templates';
 
 // The two settings note creation cares about, passed in rather than
-// reached for: this module is handed a Plugin, not the Inkling plugin,
+// reached for: this module is handed a Plugin, not the InklingExpanded plugin,
 // and widening that just to read two fields would tie it to the app
 // class for no benefit.
 export interface NoteCreationDefaults {
@@ -183,15 +183,15 @@ function openCreateNoteModal(app: App, folder: TFolder, defaults: NoteCreationDe
 			try {
 				const file = await createHandwrittenNote(app, folder, name, style, defaults.pageSize, mode);
 				// A brand-new handwritten note is created specifically to be
-				// written on right away — opened straight into Inkling's edit
+				// written on right away — opened straight into InklingExpanded's edit
 				// view rather than `openFile`'s default extension resolution,
-				// which (now that Inkling no longer claims .pdf outright, see
+				// which (now that InklingExpanded no longer claims .pdf outright, see
 				// main.ts) would otherwise land on Obsidian's read-only core
 				// PDF view first.
 				await app.workspace.getLeaf(true).setViewState({ type: VIEW_TYPE_PDF, state: { file: file.path } });
 			} catch (error) {
-				console.error('Inkling: failed to create handwritten note.', error);
-				new Notice('Inkling: could not create the handwritten note.');
+				console.error('InklingExpanded: failed to create handwritten note.', error);
+				new Notice('InklingExpanded: could not create the handwritten note.');
 			}
 		})();
 	}).open();

@@ -53,7 +53,7 @@ export async function backUp(app: App, file: TFile, bytes: ArrayBuffer, reason: 
 		for (const backup of older) await adapter.remove(backup.path);
 	} catch (error) {
 		// No copy is no reason to stop the change the user asked for.
-		console.warn('Inkling: could not keep a backup of this PDF.', error);
+		console.warn('InklingExpanded: could not keep a backup of this PDF.', error);
 	}
 }
 
@@ -108,13 +108,13 @@ export async function restoreBackup(app: App, file: TFile, backup: Backup): Prom
 		await writeBinarySafely(app.vault, file, bytes);
 		restored = true;
 	} catch (error) {
-		console.error('Inkling: could not restore a backup.', error);
+		console.error('InklingExpanded: could not restore a backup.', error);
 	} finally {
 		for (const view of views) await view.finishRestore(file);
 	}
 	await refreshCoreReaders(app, file);
-	if (restored) new Notice(`Inkling: “${file.basename}” is back as it was ${describeBackup(backup).replace(' — ', ', ')}.`);
-	else new Notice('Inkling: could not restore that version.');
+	if (restored) new Notice(`InklingExpanded: “${file.basename}” is back as it was ${describeBackup(backup).replace(' — ', ', ')}.`);
+	else new Notice('InklingExpanded: could not restore that version.');
 	return restored;
 }
 

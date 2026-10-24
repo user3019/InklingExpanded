@@ -98,7 +98,7 @@ export function commitAppend(session: IncrementalSession): void {
 function declineOnce(session: IncrementalSession, reason: string): void {
 	if (session.disabled) return;
 	session.disabled = reason;
-	console.warn(`Inkling: incremental save is off for this file — ${reason}`);
+	console.warn(`InklingExpanded: incremental save is off for this file — ${reason}`);
 }
 
 // The view's entry point, for a write that failed after the appendix was
@@ -124,7 +124,7 @@ async function fullSave(doc: PDFDocument, session: IncrementalSession, intended:
 		// Thrown, never returned alongside the bytes: there must be no path
 		// where a caller gets something back and has to decide whether to
 		// trust it.
-		throw new Error(`Inkling: refusing to save, the PDF changed unexpectedly (${difference}).`);
+		throw new Error(`InklingExpanded: refusing to save, the PDF changed unexpectedly (${difference}).`);
 	}
 
 	// A compaction collapses the chain, so the next append starts over against

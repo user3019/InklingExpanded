@@ -7,7 +7,7 @@ import { PDFArray, PDFDict, PDFDocument, PDFName, PDFNumber } from 'pdf-lib';
 // `pdf-lib`'s *initial parse* already lost something — by then the loss is
 // baked into the baseline being compared against.
 //
-// Inkling already parses every file twice on open: once with `pdf.js`, to
+// InklingExpanded already parses every file twice on open: once with `pdf.js`, to
 // render, and once with `pdf-lib`, to read annotations back. Those are two
 // independent implementations reading the same bytes, so comparing what
 // they each believe about the document's shape costs almost nothing and
@@ -87,7 +87,7 @@ export function profileFromPdfLib(doc: PDFDocument): StructureProfile {
 // Deliberately not compared: **annotation counts**.
 //
 // An earlier draft had them. They cannot work here. The pdf.js side parses
-// `displayBytes`, which is the file with Inkling's own annotations stripped
+// `displayBytes`, which is the file with InklingExpanded's own annotations stripped
 // out precisely so its annotation-baking render doesn't double up with our
 // live overlay — so on any file the user has already annotated the two
 // sides disagree by design. Beyond that, pdf.js filters what it returns by
@@ -149,7 +149,7 @@ export function riskyFeatures(doc: PDFDocument): string[] {
 		// A catalog this can't walk is itself a reason for caution, but not
 		// a reason to fail the open — the cross-parser comparison above still
 		// gets its say.
-		console.error('Inkling: could not check this PDF for forms or signatures.', error);
+		console.error('InklingExpanded: could not check this PDF for forms or signatures.', error);
 		found.push('structure that could not be read');
 	}
 	return found;

@@ -1,4 +1,5 @@
 import obsidianmd from 'eslint-plugin-obsidianmd';
+import { DEFAULT_BRANDS } from 'eslint-plugin-obsidianmd/dist/lib/rules/ui/brands.js';
 import globals from 'globals';
 import { globalIgnores, defineConfig } from 'eslint/config';
 
@@ -33,6 +34,15 @@ export default defineConfig(
 		},
 	},
 	...obsidianmd.configs.recommended,
+	{
+		// The plugin's own name, one word with two capitals, which the rule
+		// would otherwise lower to "Inklingexpanded". The recommended
+		// setting, with the name added to the rule's own list of brands —
+		// a list given here replaces that one, so it is extended, not swapped.
+		rules: {
+			'obsidianmd/ui/sentence-case': ['warn', { enforceCamelCaseLower: true, brands: [...DEFAULT_BRANDS, 'InklingExpanded'] }],
+		},
+	},
 	{
 		// The obsidianmd rules encode constraints of the Obsidian *runtime* —
 		// use createDiv() rather than document.createElement, prefer the

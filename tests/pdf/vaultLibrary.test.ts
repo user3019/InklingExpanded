@@ -76,7 +76,7 @@ describe.skipIf(!library)('the classifier against a real library', () => {
 				try {
 					doc = await PDFDocument.load(toArrayBuffer(bytes), { updateMetadata: false });
 				} catch {
-					// A book Inkling cannot open for annotation either —
+					// A book InklingExpanded cannot open for annotation either —
 					// encrypted, most likely. Not this module's problem.
 					continue;
 				}
@@ -99,7 +99,7 @@ describe.skipIf(!library)('the classifier against a real library', () => {
 			// the library, not a property of the code.
 			const supported = [...byStyle.values()].reduce((total, count) => total + count, 0);
 			console.warn(
-				`Inkling: ${supported} of ${supported + declined.length} files take the fast path ` +
+				`InklingExpanded: ${supported} of ${supported + declined.length} files take the fast path ` +
 					`(${[...byStyle].map(([style, count]) => `${count} ${style}`).join(', ') || 'none'}).`,
 			);
 			for (const line of declined) console.warn(`  declined: ${line}`);
@@ -194,7 +194,7 @@ describe.skipIf(!library)('the classifier against a real library', () => {
 			}
 
 			console.warn(
-				`Inkling: appended to ${appended} real books and pdf.js read every one back intact` +
+				`InklingExpanded: appended to ${appended} real books and pdf.js read every one back intact` +
 					`${tooBig > 0 ? `; ${tooBig} skipped as larger than ${maxAppendBytes / 1024 / 1024} MB (raise INKLING_PDF_MAX_MB)` : ''}.`,
 			);
 			expect(appended).toBeGreaterThan(0);

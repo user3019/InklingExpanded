@@ -104,7 +104,7 @@ export async function encodeStrokes(annotations: readonly Annotation[]): Promise
 			// the whole of this format's integrity checking.
 			return { strokes: toBase64(await transform(json, new CompressionStream('deflate'))), codec: 'deflate' };
 		} catch (error) {
-			console.error('Inkling: compressing a block failed, so it is being stored uncompressed.', error);
+			console.error('InklingExpanded: compressing a block failed, so it is being stored uncompressed.', error);
 		}
 	}
 	// Still base64. Everything that reads a file relies on `strokes` never

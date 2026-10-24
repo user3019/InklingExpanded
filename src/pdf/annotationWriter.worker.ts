@@ -15,7 +15,7 @@ import type { WorkerRequestMessage, WorkerResponseMessage } from './annotationWr
 // a page thick with strokes), and running it on the main thread stalled
 // pointer input for that whole stretch, felt directly as "the pen won't
 // write." One worker instance == one open file's PDFDocument for the life
-// of an Inkling editing session (PdfAnnotateView terminates it and spawns a
+// of an InklingExpanded editing session (PdfAnnotateView terminates it and spawns a
 // fresh one for the next file, rather than juggling several documents in
 // here) — so `doc` staying alive across multiple 'write' messages also
 // avoids re-parsing the whole file from scratch on every autosave.
@@ -63,7 +63,7 @@ self.onmessage = async (event: MessageEvent<WorkerRequestMessage>) => {
 
 	if (!doc || !session) {
 		const type = message.type === 'write' ? 'written' : 'acknowledged';
-		reply({ type, requestId: message.requestId, ok: false, error: 'Inkling: no document open in the annotation writer.' });
+		reply({ type, requestId: message.requestId, ok: false, error: 'InklingExpanded: no document open in the annotation writer.' });
 		return;
 	}
 

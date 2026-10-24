@@ -43,7 +43,7 @@ interface OpenedOk {
 	requestId: number;
 	ok: true;
 	savedAnnotations: Map<number, Annotation[]>;
-	// What pdf.js should render: the file with only Inkling's own
+	// What pdf.js should render: the file with only InklingExpanded's own
 	// annotations stripped out (see stripInklingAnnotations), so its default
 	// annotation-baking render still shows annotations from other PDF
 	// software without doubling up with our own live overlay.

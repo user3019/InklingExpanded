@@ -1,4 +1,4 @@
-// How Inkling's annotations are shaped inside a PDF.
+// How InklingExpanded's annotations are shaped inside a PDF.
 //
 // These live apart from both the code that writes them
 // (pdf/annotationSync.ts) and the code that reads them back out
@@ -8,7 +8,7 @@
 // have; there is no reason to leave a second way for the two halves to
 // drift apart.
 
-// Every annotation Inkling writes is tagged with its stable id in the PDF's
+// Every annotation InklingExpanded writes is tagged with its stable id in the PDF's
 // `/NM` field — the specification's own "unique annotation name", which is
 // a perfect fit. The `ink-` prefix (see src/annotate/id.ts) is what lets us
 // tell our own annotations from ones authored by other software on read,

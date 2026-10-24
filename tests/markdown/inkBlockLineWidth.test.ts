@@ -20,7 +20,7 @@ import type { Annotation } from '../../src/annotate/types';
 //
 // Confirmed by experiment rather than reasoned about. A copy of the note with
 // the fence language changed so the plugin never ran was just as laggy, which
-// ruled out anything Inkling executes; the same copy with the JSON wrapped
+// ruled out anything InklingExpanded executes; the same copy with the JSON wrapped
 // was smooth. Source mode was always smooth, which is what pointed at the
 // rendering pass rather than at CodeMirror's handling of long lines.
 //

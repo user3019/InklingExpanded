@@ -52,7 +52,7 @@ running the old code until the plugin is toggled off and on there.
 
    ```bash
    git checkout Trunk && git pull
-   git tag -a 1.1.0 -m "Inkling 1.1.0"
+   git tag -a 1.1.0 -m "InklingExpanded 1.1.0"
    git push origin 1.1.0
    ```
 

@@ -42,7 +42,7 @@ export interface InkFileContents {
 
 export type InkFileRead =
 	| { kind: 'readable'; contents: InkFileContents }
-	// Valid, and written by a newer Inkling. Never written over, never repaired.
+	// Valid, and written by a newer InklingExpanded. Never written over, never repaired.
 	| { kind: 'from-future'; version: number }
 	// Not JSON, or JSON that is not a block map.
 	| { kind: 'damaged' };

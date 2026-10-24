@@ -91,7 +91,7 @@ describe('compareProfiles', () => {
 	});
 
 	it('does not compare annotation counts', () => {
-		// Deliberate: the pdf.js side reads displayBytes, which has Inkling's
+		// Deliberate: the pdf.js side reads displayBytes, which has InklingExpanded's
 		// own annotations stripped, so on any already-annotated file the two
 		// sides differ by design. A book opening read-only for that reason
 		// would be a false positive worse than the check is worth.

@@ -441,7 +441,7 @@
    here on source order alone. Measured, not guessed — see the comment on
    iconButton() in src/annotate/toolbar.ts for what that looked like. The
    `clickable-icon` these also carry supplies the flat, theme-appropriate
-   base; everything below is Inkling's own sizing and selected state on top
+   base; everything below is InklingExpanded's own sizing and selected state on top
    of it. */
 .inkling-toolbar .inkling-tool-button {
 	display: flex;

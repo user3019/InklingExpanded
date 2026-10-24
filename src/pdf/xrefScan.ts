@@ -5,7 +5,7 @@
 // parsing every object it meets, and reads a trailer only to pick up /Root
 // and /Info. `startxref` is parsed and then discarded. Two consequences: we
 // have to find it ourselves, and a book whose cross-reference table is
-// broken opens perfectly well in Inkling today because nothing consults it.
+// broken opens perfectly well in InklingExpanded today because nothing consults it.
 //
 // The second is why this module exists. Appending to such a file writes a
 // /Prev pointing at an offset that is not a cross-reference section, which
@@ -174,7 +174,7 @@ function dictionaryTextAt(bytes: Uint8Array, from: number): string | null {
 //
 // Only two answers are useful: the classic `xref` keyword, or an indirect
 // object whose dictionary says `/Type /XRef`. Everything else — including a
-// file whose xref was already broken before Inkling ever saw it — is
+// file whose xref was already broken before InklingExpanded ever saw it — is
 // 'unknown', which the classifier turns into a decline.
 export function scanLastXref(bytes: Uint8Array): XrefScan | XrefUnknown {
 	const offset = findStartXref(bytes);

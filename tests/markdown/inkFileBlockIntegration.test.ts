@@ -158,7 +158,7 @@ describe('blocks that may not be saved', () => {
 	it.each([
 		['the ink file does not exist', {}, 'cannot find the ink file'],
 		['the ink file holds no such block', { [INK]: 'placeholder' }, 'holds no drawing for this block'],
-		['the ink file is from a newer version', { [INK]: '{"version":4,"blocks":{}}' }, 'newer version of Inkling'],
+		['the ink file is from a newer version', { [INK]: '{"version":4,"blocks":{}}' }, 'newer version of InklingExpanded'],
 		['the ink file cannot be read', { [INK]: '{"version":1,"blocks":{"a":' }, 'could not read the ink file'],
 	])('refuse ink, change nothing, and say why, when %s', async (_label, files: Record<string, string>, says) => {
 		const inkFiles = files[INK] === 'placeholder' ? { [INK]: await inkFileText({ other: holding() }) } : files;

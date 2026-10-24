@@ -87,8 +87,8 @@ export function applyTemplateStyle(page: PDFPage, style: TemplateStyle): void {
 // e.g. pdf.js's getMetadata(), used to gate the "Add page"/"New handwritten
 // note" affordances without paying for a second document parse on every
 // file open — can use it too. Returns null (not 'blank') when the marker is
-// absent entirely, which is how callers tell "not an Inkling note" apart
-// from "an Inkling note using the blank template".
+// absent entirely, which is how callers tell "not an InklingExpanded note" apart
+// from "an InklingExpanded note using the blank template".
 export function parseTemplateStyleFromKeywords(keywords: string | null | undefined): TemplateStyle | null {
 	if (!keywords) return null;
 	for (const keyword of keywords.split(/\s+/)) {

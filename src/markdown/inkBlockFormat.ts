@@ -444,7 +444,7 @@ function flatPoint(point: Point): number[] {
 // A stroke's points as format 2 stores them: coordinates in one flat array,
 // and pressure in a parallel array beside it — the same shape the PDF side
 // already uses, where /InkList holds flat coordinates and the private
-// /Inkling /P a parallel byte array.
+// /InklingExpanded /P a parallel byte array.
 //
 // A point with no pressure writes `null` rather than being left out, so the
 // two arrays always agree on how many samples there are and a gap stays a
@@ -505,7 +505,7 @@ export function storedAnnotation(annotation: Annotation): Record<string, unknown
 //
 // Established by experiment rather than reasoned about. A copy of the note
 // with the fence language changed — so this plugin never ran at all — lagged
-// exactly the same, which ruled out anything Inkling executes. The same copy
+// exactly the same, which ruled out anything InklingExpanded executes. The same copy
 // with the JSON wrapped was smooth. Source mode was smooth throughout, which
 // is what pointed at the rendering pass rather than at CodeMirror's handling
 // of long lines.

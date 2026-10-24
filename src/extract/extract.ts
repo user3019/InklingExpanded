@@ -12,7 +12,7 @@ import type { ExtractedAnnotation } from './extractFormat';
 //
 // Two libraries, each doing the half it can. pdf-lib reads the annotation
 // dictionaries — it sees every key, including /NM (the stable `ink-` id)
-// and our own private /Inkling /Q (the words a highlight covered, captured
+// and our own private /InklingExpanded /Q (the words a highlight covered, captured
 // when it was drawn). pdf.js reads the page text, which is the one thing
 // pdf-lib cannot do.
 //
@@ -227,7 +227,7 @@ function readAnnotationDict(dict: PDFDict, pageNumber: number): Pending | null {
 // Recovers the quotes that were not stored, by reading the text under each
 // annotation. Only pages that need it are opened, and if none do, pdf.js is
 // never loaded at all — which is the common case for a book annotated in
-// Inkling, and why reading annotation dictionaries with a second library
+// InklingExpanded, and why reading annotation dictionaries with a second library
 // does not make extraction slower.
 async function fillMissingQuotes(bytes: ArrayBuffer, byPage: Map<number, Pending[]>): Promise<void> {
 	const pages = [...byPage].filter(([, pending]) => pending.some((p) => p.needsQuote)).map(([pageNumber]) => pageNumber);
@@ -273,7 +273,7 @@ export async function collectAnnotations(bytes: ArrayBuffer, options: CollectOpt
 			} catch (error) {
 				// One malformed annotation in a book is not a reason to
 				// extract none of the others.
-				console.error('Inkling: skipping an unreadable annotation while extracting.', error);
+				console.error('InklingExpanded: skipping an unreadable annotation while extracting.', error);
 			}
 		}
 

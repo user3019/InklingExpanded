@@ -41,11 +41,11 @@ const SCROLL_RESTORE_MS = 120;
 function damageMessage(damage: InkBlockDamage): string {
 	switch (damage.kind) {
 		case 'unreadable':
-			return 'Inkling could not read this ink block at all, so it will not be saved over. Its text is still in the note, exactly as it was.';
+			return 'InklingExpanded could not read this ink block at all, so it will not be saved over. Its text is still in the note, exactly as it was.';
 		case 'partial':
-			return `Inkling could read ${damage.kept} of the ${damage.kept + damage.dropped} annotations in this ink block, so it will not be saved over.`;
+			return `InklingExpanded could read ${damage.kept} of the ${damage.kept + damage.dropped} annotations in this ink block, so it will not be saved over.`;
 		case 'from-future':
-			return `This ink block is in format ${damage.version} and this version of Inkling reads format ${INK_BLOCK_VERSION}, so it will not be saved over. Update Inkling to edit it.`;
+			return `This ink block is in format ${damage.version} and this version of InklingExpanded reads format ${INK_BLOCK_VERSION}, so it will not be saved over. Update InklingExpanded to edit it.`;
 		case 'none':
 			return '';
 	}
@@ -276,8 +276,8 @@ export class InNoteStorage implements InkBlockStorage {
 			restoreScroll();
 			return { kind: 'saved' };
 		} catch (error) {
-			console.error('Inkling: failed to save an ink block.', error);
-			new Notice('Inkling: could not save this ink block. Your drawing is still on screen and will be saved again shortly.');
+			console.error('InklingExpanded: failed to save an ink block.', error);
+			new Notice('InklingExpanded: could not save this ink block. Your drawing is still on screen and will be saved again shortly.');
 			return { kind: 'held' };
 		}
 	}
@@ -345,10 +345,10 @@ export class InNoteStorage implements InkBlockStorage {
 		if (this.reportedStaleWrite) return { kind: 'held' };
 		this.reportedStaleWrite = true;
 		console.error(
-			`Inkling: ink block ${this.blockId} in ${this.ctx.sourcePath} changed elsewhere and cannot be read, ` +
+			`InklingExpanded: ink block ${this.blockId} in ${this.ctx.sourcePath} changed elsewhere and cannot be read, ` +
 				'so this save was refused rather than written over it. The drawing is held on this device.',
 		);
-		new Notice('Inkling: this ink block changed elsewhere and could not be read, so it was not saved over.');
+		new Notice('InklingExpanded: this ink block changed elsewhere and could not be read, so it was not saved over.');
 		return { kind: 'held' };
 	}
 
@@ -377,11 +377,11 @@ export class InNoteStorage implements InkBlockStorage {
 		if (this.reportedMismatch) return;
 		this.reportedMismatch = true;
 		console.error(
-			`Inkling: could not find ink block ${this.blockId} in ${this.ctx.sourcePath} to save it. ` +
+			`InklingExpanded: could not find ink block ${this.blockId} in ${this.ctx.sourcePath} to save it. ` +
 				'The drawing is still on screen and is held on this device, and will be written the next time the note renders. ' +
 				'If the block was deleted from the note, that is expected.',
 		);
-		new Notice('Inkling: an ink block could not be saved yet. Your drawing is safe — leave the note open.');
+		new Notice('InklingExpanded: an ink block could not be saved yet. Your drawing is safe — leave the note open.');
 	}
 
 	// Any open editor on this note, not just the focused one — drawing on a

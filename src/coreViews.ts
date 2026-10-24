@@ -64,7 +64,7 @@ export async function refreshCoreReaders(app: App, file: TFile): Promise<void> {
 			await rebuild.call(leaf);
 			if (page !== null) leaf.view.setEphemeralState({ subpath: `#page=${page}` });
 		} catch (error) {
-			console.warn('Inkling: could not refresh a PDF reader after changing its pages.', error);
+			console.warn('InklingExpanded: could not refresh a PDF reader after changing its pages.', error);
 		}
 	}
 }

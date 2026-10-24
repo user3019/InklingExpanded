@@ -266,7 +266,7 @@ export class InkFileStore {
 		try {
 			text = await this.io.read(this.path);
 		} catch (error) {
-			console.error(`Inkling: could not read ${this.path}.`, error);
+			console.error(`InklingExpanded: could not read ${this.path}.`, error);
 			// Not the same as absent: something is there. Nothing is known about
 			// it, so nothing may be written over it.
 			if (this.current.kind === 'loading') {
@@ -385,7 +385,7 @@ export class InkFileStore {
 			// still passes, because it decodes to zero of zero.
 			const check = await decodeStrokes(raw.strokes, raw.codec);
 			if (check.kind !== 'decoded' || check.annotations.length !== next.annotations.length) {
-				console.error(`Inkling: block ${id} did not encode faithfully, so ${this.path} was not written.`);
+				console.error(`InklingExpanded: block ${id} did not encode faithfully, so ${this.path} was not written.`);
 				return refused('encoding-mismatch');
 			}
 
@@ -403,7 +403,7 @@ export class InkFileStore {
 			try {
 				result = await this.io.replaceIf(this.path, status === 'absent' ? null : this.lastText, text);
 			} catch (error) {
-				console.error(`Inkling: could not write ${this.path}.`, error);
+				console.error(`InklingExpanded: could not write ${this.path}.`, error);
 				return refused('failed');
 			}
 
@@ -437,7 +437,7 @@ export class InkFileStore {
 				size = null;
 			}
 			if (size !== null && size !== byteLength(text)) {
-				console.error(`Inkling: ${this.path} is ${size} bytes after writing ${byteLength(text)}; the write did not complete.`);
+				console.error(`InklingExpanded: ${this.path} is ${size} bytes after writing ${byteLength(text)}; the write did not complete.`);
 				return refused('failed');
 			}
 
@@ -450,7 +450,7 @@ export class InkFileStore {
 				}
 				const read = reread === null ? null : parseInkFile(reread);
 				if (read?.kind !== 'readable' || JSON.stringify(read.contents.blocks.get(id)) !== JSON.stringify(raw)) {
-					console.error(`Inkling: ${this.path} did not read back as written.`);
+					console.error(`InklingExpanded: ${this.path} did not read back as written.`);
 					return refused('failed');
 				}
 				this.verifyNextWrite = false;

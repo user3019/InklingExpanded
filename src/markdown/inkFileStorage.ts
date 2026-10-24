@@ -34,7 +34,7 @@ function fenceMessage(reason: InkFenceDamage): string {
 		case 'missing-id':
 			return 'This ink block does not say which drawing in its ink file is its own, so it cannot be shown or saved. Its fence needs an "id:" line.';
 		case 'duplicate-key':
-			return 'This ink block names its ink file or its id twice, so Inkling cannot tell which is meant and will not save it.';
+			return 'This ink block names its ink file or its id twice, so InklingExpanded cannot tell which is meant and will not save it.';
 		case 'not-a-vault-path':
 			return 'This ink block names an ink file outside the vault or in a hidden folder, so it cannot be shown or saved.';
 	}
@@ -43,13 +43,13 @@ function fenceMessage(reason: InkFenceDamage): string {
 function refusalFor(status: InkFileStatus, state: BlockState, path: string): BlockRefusal | null {
 	switch (status.kind) {
 		case 'absent':
-			return { message: `Inkling cannot find the ink file ${path}, so this block will not be saved. Anything drawn here is held on this device.` };
+			return { message: `InklingExpanded cannot find the ink file ${path}, so this block will not be saved. Anything drawn here is held on this device.` };
 		case 'from-future':
 			return {
-				message: `The ink file ${path} was written by a newer version of Inkling (format ${status.version}; this version reads format ${INK_FILE_VERSION}), so this block will not be saved over it. Update Inkling to edit it.`,
+				message: `The ink file ${path} was written by a newer version of InklingExpanded (format ${status.version}; this version reads format ${INK_FILE_VERSION}), so this block will not be saved over it. Update InklingExpanded to edit it.`,
 			};
 		case 'damaged':
-			return { message: `Inkling could not read the ink file ${path}, so this block will not be saved over it.` };
+			return { message: `InklingExpanded could not read the ink file ${path}, so this block will not be saved over it.` };
 		case 'loading':
 		case 'readable':
 			break;
@@ -58,7 +58,7 @@ function refusalFor(status: InkFileStatus, state: BlockState, path: string): Blo
 		case 'absent':
 			return { message: `The ink file ${path} holds no drawing for this block, so it will not be saved.` };
 		case 'undecodable':
-			return { message: `Inkling could not read this block's drawing in ${path}, so it will not be saved over it. The file's other drawings are unaffected.` };
+			return { message: `InklingExpanded could not read this block's drawing in ${path}, so it will not be saved over it. The file's other drawings are unaffected.` };
 		case 'unsupported':
 			return { message: `This block's drawing is stored with ${state.codec} compression, which this device cannot read, so it will not be saved over it.` };
 		case 'decoded':
@@ -221,8 +221,8 @@ export class InkFileStorage implements InkBlockStorage {
 					return { kind: 'retry', afterMs: FAILED_SAVE_RETRY_MS };
 				}
 				if (this.failedSaves === FAILED_SAVE_RETRIES + 1 || reason === 'encoding-mismatch') {
-					console.error(`Inkling: could not save ink block ${this.blockId} to ${this.rescuePath} (${reason}). The drawing is held on this device.`);
-					new Notice('Inkling: could not save this ink block to its ink file. Your drawing is still on screen and is held on this device.');
+					console.error(`InklingExpanded: could not save ink block ${this.blockId} to ${this.rescuePath} (${reason}). The drawing is held on this device.`);
+					new Notice('InklingExpanded: could not save this ink block to its ink file. Your drawing is still on screen and is held on this device.');
 				}
 				return { kind: 'held' };
 		}

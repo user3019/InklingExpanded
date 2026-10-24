@@ -31,7 +31,7 @@ jobs:
 
       # Signs a provenance statement for each file a user installs, so anyone
       # can check it was built by this workflow from this commit:
-      #   gh attestation verify main.js --repo Bluewolf135/Inkling
+      #   gh attestation verify main.js --repo user3019/InklingExpanded
       - name: Attest
         uses: actions/attest-build-provenance@v4
         with:

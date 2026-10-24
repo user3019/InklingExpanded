@@ -107,7 +107,7 @@ describe('classifyIncrementalSave', () => {
 		const bytes = await classicTableBytes();
 		const doc = await load(bytes);
 		// An encrypted book cannot reach the writer at all — PDFDocument.load
-		// throws EncryptedPDFError and Inkling never passes ignoreEncryption
+		// throws EncryptedPDFError and InklingExpanded never passes ignoreEncryption
 		// — so this can only be reached by a file that acquired /Encrypt some
 		// other way. Declining is still the right answer.
 		doc.context.trailerInfo.Encrypt = PDFNumber.of(1);

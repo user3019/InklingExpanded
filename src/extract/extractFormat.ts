@@ -11,7 +11,7 @@ export interface ExtractedAnnotation {
 	color: string;
 	quote: string;
 	note: string;
-	// Written by other PDF software rather than by Inkling. Labelled in the
+	// Written by other PDF software rather than by InklingExpanded. Labelled in the
 	// output, because "I highlighted this in Xodo two years ago" is real
 	// context about how much to trust a quote.
 	foreign: boolean;

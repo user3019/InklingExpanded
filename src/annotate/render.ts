@@ -206,7 +206,7 @@ function pictureBitmap(picture: PicturePixels): ImageBitmap | null {
 		},
 		(error: unknown) => {
 			pictures.set(picture, 'failed');
-			console.error('Inkling: could not decode a picture.', error);
+			console.error('InklingExpanded: could not decode a picture.', error);
 		},
 	);
 	return null;

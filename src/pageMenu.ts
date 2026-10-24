@@ -86,7 +86,7 @@ class DeletePageModal extends Modal {
 }
 
 // Removes the page and writes the file. Obsidian's reader reloads a PDF that
-// changes, and so does Inkling's annotate view, so whatever has it open
+// changes, and so does InklingExpanded's annotate view, so whatever has it open
 // shows the result.
 export async function deletePage(app: App, file: TFile, pageNumber: number): Promise<boolean> {
 	try {
@@ -98,17 +98,17 @@ export async function deletePage(app: App, file: TFile, pageNumber: number): Pro
 		const before = await app.vault.readBinary(file);
 		const result = await removePage(before, pageNumber);
 		if (result.kind === 'refused') {
-			new Notice(`Inkling: page ${pageNumber} was not deleted — ${result.reason}.`);
+			new Notice(`InklingExpanded: page ${pageNumber} was not deleted — ${result.reason}.`);
 			return false;
 		}
 		await backUp(app, file, before, 'delete-page');
 		await writeBinarySafely(app.vault, file, toArrayBuffer(result.bytes));
 		await refreshCoreReaders(app, file);
-		new Notice(`Inkling: deleted page ${pageNumber}. ${result.pageCount} ${result.pageCount === 1 ? 'page' : 'pages'} left.`);
+		new Notice(`InklingExpanded: deleted page ${pageNumber}. ${result.pageCount} ${result.pageCount === 1 ? 'page' : 'pages'} left.`);
 		return true;
 	} catch (error) {
-		console.error('Inkling: failed to delete a page.', error);
-		new Notice(`Inkling: could not delete page ${pageNumber}.`);
+		console.error('InklingExpanded: failed to delete a page.', error);
+		new Notice(`InklingExpanded: could not delete page ${pageNumber}.`);
 		return false;
 	}
 }

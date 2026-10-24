@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mountNote, type TestNote } from '../harness/note';
 import { INK_BLOCK_VERSION, parseInkBlock } from '../../src/markdown/inkBlockFormat';
 
-// A block Inkling cannot fully read is never written over, and that is not
+// A block InklingExpanded cannot fully read is never written over, and that is not
 // changing: what failed to parse is exactly the part nobody can see, and
 // overwriting it with what little survived is the one failure here that
 // cannot be undone.
@@ -60,7 +60,7 @@ function recoverButton(): HTMLButtonElement | null {
 	return note.block(0).el.querySelector<HTMLButtonElement>('.inkling-ink-block-banner-action');
 }
 
-describe('a block Inkling could only partly read', () => {
+describe('a block InklingExpanded could only partly read', () => {
 	beforeEach(() => {
 		note = noteHolding(
 			block('ink-partial', [goodStroke('a'), badStroke('b'), goodStroke('c'), badStroke('d'), goodStroke('e')]),
@@ -125,7 +125,7 @@ describe('a block that yielded nothing at all', () => {
 	});
 });
 
-describe('a block written by a newer version of Inkling', () => {
+describe('a block written by a newer version of InklingExpanded', () => {
 	beforeEach(() => {
 		note = noteHolding(block('ink-future', [goodStroke('a'), badStroke('b')], INK_BLOCK_VERSION + 1), 'ink-future');
 	});

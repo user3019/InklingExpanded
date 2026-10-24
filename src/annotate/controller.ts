@@ -403,7 +403,7 @@ export class AnnotationController {
 		overlayCanvas.height = height;
 
 		const base = baseCanvas.getContext('2d');
-		if (!base) throw new Error('Inkling: could not acquire a 2D context for the annotation layer.');
+		if (!base) throw new Error('InklingExpanded: could not acquire a 2D context for the annotation layer.');
 
 		const detach = attachPointerGestures(overlayCanvas, () => this.getHandlersFor(pageNumber));
 		this.pages.set(pageNumber, {
@@ -1207,8 +1207,8 @@ export class AnnotationController {
 			this.store.commitGesture(pageNumber, before);
 			this.selection = { pageNumber, ids: new Set([id]) };
 		} catch (error) {
-			console.error('Inkling: could not crop a picture.', error);
-			new Notice('Inkling: could not crop the picture.');
+			console.error('InklingExpanded: could not crop a picture.', error);
+			new Notice('InklingExpanded: could not crop the picture.');
 		}
 		this.redrawOverlay(pageNumber);
 		this.notify();
@@ -2265,7 +2265,7 @@ export class AnnotationController {
 		if (mount.overlay) return mount.overlay;
 
 		const overlay = mount.overlayCanvas.getContext('2d');
-		if (!overlay) throw new Error('Inkling: could not acquire a 2D context for the annotation layer.');
+		if (!overlay) throw new Error('InklingExpanded: could not acquire a 2D context for the annotation layer.');
 		mount.overlay = overlay;
 		return overlay;
 	}

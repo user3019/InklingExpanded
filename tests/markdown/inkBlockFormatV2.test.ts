@@ -12,7 +12,7 @@ import type { Annotation } from '../../src/annotate/types';
 // — in a parallel array beside it.
 //
 // The shape is deliberately the one the PDF side already uses: /InkList is
-// flat coordinates and the private /Inkling /P is a parallel byte array of
+// flat coordinates and the private /InklingExpanded /P is a parallel byte array of
 // pressure. The two halves of this plugin had no reason to store the same
 // drawing in two different shapes.
 //

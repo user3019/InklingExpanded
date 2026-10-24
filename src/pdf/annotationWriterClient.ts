@@ -104,7 +104,7 @@ export class AnnotationWriterClient {
 	private terminated = false;
 
 	async open(bytes: ArrayBuffer): Promise<OpenResult> {
-		if (this.terminated) throw new Error('Inkling: annotation writer is no longer usable.');
+		if (this.terminated) throw new Error('InklingExpanded: annotation writer is no longer usable.');
 
 		if ((await this.ensureMode()) === 'main') {
 			const opened = await openDocument(bytes);
@@ -127,10 +127,10 @@ export class AnnotationWriterClient {
 	}
 
 	async write(pages: WritePage[]): Promise<WriteOutcome> {
-		if (this.terminated) throw new Error('Inkling: annotation writer is no longer usable.');
+		if (this.terminated) throw new Error('InklingExpanded: annotation writer is no longer usable.');
 
 		if ((await this.ensureMode()) === 'main') {
-			if (!this.mainDoc || !this.mainSession) throw new Error('Inkling: no document open in the annotation writer.');
+			if (!this.mainDoc || !this.mainSession) throw new Error('InklingExpanded: no document open in the annotation writer.');
 			const outcome = await writeDocument(this.mainDoc, this.mainSession, pages);
 			return outcome.mode === 'full'
 				? { mode: 'full', bytes: toArrayBuffer(outcome.bytes) }
@@ -179,7 +179,7 @@ export class AnnotationWriterClient {
 		this.disposeWorker();
 		this.mainDoc = null;
 		this.mainSession = null;
-		this.failPending(new Error('Inkling: annotation writer terminated.'));
+		this.failPending(new Error('InklingExpanded: annotation writer terminated.'));
 	}
 
 	// Brings up the worker and waits for it to prove it's alive, falling back
@@ -193,7 +193,7 @@ export class AnnotationWriterClient {
 
 	private async resolveMode(): Promise<Mode> {
 		try {
-			if (!sourceProvider) throw new Error('Inkling: annotation writer worker source was never configured.');
+			if (!sourceProvider) throw new Error('InklingExpanded: annotation writer worker source was never configured.');
 			cachedSource ??= await sourceProvider();
 
 			this.blobUrl = URL.createObjectURL(new Blob([cachedSource], { type: 'text/javascript' }));
@@ -202,7 +202,7 @@ export class AnnotationWriterClient {
 
 			const ready = new Promise<void>((resolve, reject) => {
 				const timeout = window.setTimeout(
-					() => reject(new Error('Inkling: annotation writer worker never started.')),
+					() => reject(new Error('InklingExpanded: annotation writer worker never started.')),
 					WORKER_READY_TIMEOUT_MS,
 				);
 				worker.onmessage = (event: MessageEvent<WorkerResponseMessage>) => {
@@ -217,7 +217,7 @@ export class AnnotationWriterClient {
 				};
 				worker.onerror = (event) => {
 					window.clearTimeout(timeout);
-					reject(new Error(`Inkling: annotation writer worker failed to start. ${event.message}`));
+					reject(new Error(`InklingExpanded: annotation writer worker failed to start. ${event.message}`));
 				};
 			});
 
@@ -234,9 +234,9 @@ export class AnnotationWriterClient {
 			// Only meaningful once the worker is known good: from here a crash
 			// should fail in-flight requests rather than let them time out.
 			worker.onerror = (event) => {
-				console.error('Inkling: annotation writer worker crashed.', event);
+				console.error('InklingExpanded: annotation writer worker crashed.', event);
 				this.disposeWorker();
-				this.failPending(new Error('Inkling: annotation writer worker crashed.'));
+				this.failPending(new Error('InklingExpanded: annotation writer worker crashed.'));
 			};
 
 			return 'worker';
@@ -244,7 +244,7 @@ export class AnnotationWriterClient {
 			// Not a user-facing failure: everything still works, just on the
 			// main thread, so saving a heavily annotated page can briefly stall
 			// input where it otherwise wouldn't.
-			console.warn('Inkling: annotation writer worker unavailable, falling back to the main thread.', error);
+			console.warn('InklingExpanded: annotation writer worker unavailable, falling back to the main thread.', error);
 			this.disposeWorker();
 			return 'main';
 		}
@@ -271,7 +271,7 @@ export class AnnotationWriterClient {
 		return new Promise<T>((resolve, reject) => {
 			const timeout = window.setTimeout(() => {
 				this.pending.delete(requestId);
-				reject(new Error('Inkling: annotation writer timed out.'));
+				reject(new Error('InklingExpanded: annotation writer timed out.'));
 			}, REQUEST_TIMEOUT_MS);
 			this.pending.set(requestId, { resolve, reject, timeout });
 		});

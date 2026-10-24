@@ -65,7 +65,7 @@ export async function writeBinarySafely<F extends { path: string }>(
 	bytes: ArrayBuffer,
 ): Promise<void> {
 	if (!looksLikePdf(bytes)) {
-		throw new Error(`Inkling: refusing to write ${bytes.byteLength} bytes to ${file.path} — that is not a PDF.`);
+		throw new Error(`InklingExpanded: refusing to write ${bytes.byteLength} bytes to ${file.path} — that is not a PDF.`);
 	}
 
 	const expected = bytes.byteLength;
@@ -79,7 +79,7 @@ export async function writeBinarySafely<F extends { path: string }>(
 	const stat = await vault.adapter.stat(file.path);
 	if (stat && stat.size !== expected) {
 		throw new Error(
-			`Inkling: ${file.path} is ${stat.size} bytes after writing ${expected} — the write did not complete.`,
+			`InklingExpanded: ${file.path} is ${stat.size} bytes after writing ${expected} — the write did not complete.`,
 		);
 	}
 }
@@ -141,10 +141,10 @@ export async function appendBinarySafely<F extends { path: string }>(
 	baseLength: number,
 ): Promise<void> {
 	if (!canAppendBinary(vault)) {
-		throw new Error(`Inkling: this version of Obsidian has no Vault.appendBinary, so ${file.path} cannot be updated in place.`);
+		throw new Error(`InklingExpanded: this version of Obsidian has no Vault.appendBinary, so ${file.path} cannot be updated in place.`);
 	}
 	if (!looksLikeUpdateSection(appendix)) {
-		throw new Error(`Inkling: refusing to append ${appendix.byteLength} bytes to ${file.path} — that does not end at %%EOF.`);
+		throw new Error(`InklingExpanded: refusing to append ${appendix.byteLength} bytes to ${file.path} — that does not end at %%EOF.`);
 	}
 
 	// Before, and this is the load-bearing one. stat rather than a re-read: a
@@ -153,7 +153,7 @@ export async function appendBinarySafely<F extends { path: string }>(
 	const before = await vault.adapter.stat(file.path);
 	if (before && before.size !== baseLength) {
 		throw new Error(
-			`Inkling: ${file.path} is ${before.size} bytes where the update was built against ${baseLength} — it changed underneath us.`,
+			`InklingExpanded: ${file.path} is ${before.size} bytes where the update was built against ${baseLength} — it changed underneath us.`,
 		);
 	}
 
@@ -162,6 +162,6 @@ export async function appendBinarySafely<F extends { path: string }>(
 	const expected = baseLength + appendix.byteLength;
 	const after = await vault.adapter.stat(file.path);
 	if (after && after.size !== expected) {
-		throw new Error(`Inkling: ${file.path} is ${after.size} bytes after appending to ${expected} — the write did not complete.`);
+		throw new Error(`InklingExpanded: ${file.path} is ${after.size} bytes after appending to ${expected} — the write did not complete.`);
 	}
 }

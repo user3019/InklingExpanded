@@ -47,7 +47,7 @@ describe('fingerprintDocument', () => {
 		}
 	});
 
-	it("ignores Inkling's own annotations being added", async () => {
+	it("ignores InklingExpanded's own annotations being added", async () => {
 		const doc = await sampleDoc();
 		const before = fingerprintDocument(doc);
 		writeInklingAnnotations(doc, 0, [stroke]);
