@@ -40,14 +40,14 @@ jobs:
             manifest.json
             styles.css
 
-      # Draft, not published. A tag should not become an install target
-      # before someone has looked at it.
-      - name: Create a draft release
+      # Published straight away: BRAT installs and updates from published
+      # releases only, so a draft would never reach a device. The checks
+      # above are what stand between a tag and an install.
+      - name: Create the release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release create "$GITHUB_REF_NAME" \
-            --draft \
             --title "$GITHUB_REF_NAME" \
             --generate-notes \
             main.js manifest.json styles.css
