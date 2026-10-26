@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { decodePDFRawStream, PDFArray, PDFDocument, PDFName, PDFRawStream, PDFRef, StandardFonts } from 'pdf-lib';
+import { decodePDFRawStream, degrees, PDFArray, PDFDocument, PDFName, PDFRawStream, PDFRef, StandardFonts } from 'pdf-lib';
 import { classifyStream, isTemplateDrawing, setPageBackground } from '../../src/pdf/pageBackground';
 import { createHandwrittenNoteBytes, readTemplateStyle } from '../../src/templates';
 import { isInfiniteCanvasKeywords } from '../../src/pdf/infiniteCanvas';
@@ -116,6 +116,51 @@ describe('changing a page’s background', () => {
 	it('refuses a page that is not there', async () => {
 		const result = await setPageBackground(await createHandwrittenNoteBytes('blank'), 4, 'lined');
 		expect(result.kind).toBe('refused');
+	});
+});
+
+describe('a background on a PDF the plugin did not make', () => {
+	it('lines a book without turning it into a note', async () => {
+		const book = await PDFDocument.create();
+		book.addPage([500, 700]);
+		book.addPage([500, 700]);
+		const lined = await changed(await book.save(), 'all', 'lined');
+		const doc = await PDFDocument.load(lined);
+		expect((await contentsOf(lined, 2)).join('')).toContain(RULE);
+		// No note's marking: Add page goes on adding pages the book's size.
+		expect(doc.getKeywords()).toBeUndefined();
+	});
+
+	// Where the first ruled line lands on screen, for a page turned by
+	// `rotation`: its two ends in the page's own space, through the stream's
+	// cm, then turned the way a reader shows the page (clockwise).
+	async function firstLineOnScreen(rotation: number) {
+		const scan = await PDFDocument.create();
+		scan.addPage([600, 800]).setRotation(degrees(rotation));
+		const [text = ''] = await contentsOf(await changed(await scan.save(), 1, 'lined'), 1);
+		const cm = /([-\d.]+) ([-\d.]+) ([-\d.]+) ([-\d.]+) ([-\d.]+) ([-\d.]+) cm/.exec(text);
+		const line = /([-\d.]+) ([-\d.]+) m ([-\d.]+) ([-\d.]+) l S/.exec(text);
+		if (!cm || !line) throw new Error('no ruling');
+		const [a, b, c, d, e, f] = cm.slice(1).map(Number) as [number, number, number, number, number, number];
+		const [u1, v1, u2, v2] = line.slice(1).map(Number) as [number, number, number, number];
+		const onPage = (u: number, v: number) => ({ x: a * u + c * v + e, y: b * u + d * v + f });
+		// The page, 600 wide and 800 high, as a reader shows it, y down: a
+		// quarter turn clockwise takes its left edge to the top and its top
+		// edge to the right.
+		const shown = ({ x, y }: { x: number; y: number }) =>
+			rotation === 90 ? { x: y, y: x } : rotation === 180 ? { x: 600 - x, y } : rotation === 270 ? { x: 800 - y, y: 600 - x } : { x, y: 800 - y };
+		return [shown(onPage(u1, v1)), shown(onPage(u2, v2))] as const;
+	}
+
+	it('rules a page turned sideways across the screen, not up it', async () => {
+		for (const rotation of [0, 90, 180, 270]) {
+			const [start, end] = await firstLineOnScreen(rotation);
+			// Level on screen, a line-height below the top, edge to edge.
+			expect(start.y).toBeCloseTo(end.y, 6);
+			expect(start.y).toBeCloseTo(24, 6);
+			expect(Math.min(start.x, end.x)).toBeCloseTo(0, 6);
+			expect(Math.max(start.x, end.x)).toBeCloseTo(rotation % 180 === 0 ? 600 : 800, 6);
+		}
 	});
 });
 

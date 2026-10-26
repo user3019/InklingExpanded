@@ -334,7 +334,7 @@ export class AnnotationController {
 	private selection: { pageNumber: number; ids: Set<string> } = { pageNumber: -1, ids: new Set() };
 	private drag: { pageNumber: number; mode: DragMode } | null = null;
 	private canManagePages = false;
-	private isNote = false;
+	private backgroundChangeable = false;
 	// Set when the document cannot be safely written to (see
 	// src/pdf/compatibility.ts). Every input path checks it, rather than the
 	// view simply not attaching gestures, because a book is rendered lazily,
@@ -488,10 +488,11 @@ export class AnnotationController {
 		this.notify();
 	}
 
-	// Whether this is a note, whose background can be changed — an infinite
-	// canvas included, which has no pages to add but has a background.
-	setIsNote(value: boolean): void {
-		this.isNote = value;
+	// Whether the pages shown here can have their background changed — any
+	// PDF can, an infinite canvas included, which has no pages to add but has
+	// a background. An ink block has no pages at all.
+	setCanChangeBackground(value: boolean): void {
+		this.backgroundChangeable = value;
 		this.notify();
 	}
 
@@ -2047,7 +2048,7 @@ export class AnnotationController {
 	}
 
 	canChangeBackground(): boolean {
-		return this.isNote && !!this.options.onChangeBackground;
+		return this.backgroundChangeable && !!this.options.onChangeBackground;
 	}
 
 	openBackground(anchor: HTMLElement): void {

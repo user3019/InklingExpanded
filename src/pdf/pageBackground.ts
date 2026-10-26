@@ -1,7 +1,14 @@
 import { decodePDFRawStream, PDFArray, PDFDocument, PDFName, PDFObject, PDFPage, PDFRawStream, PDFRef } from 'pdf-lib';
 import { riskyFeatures } from './compatibility';
 import { isInfiniteCanvasKeywords } from './infiniteCanvas';
-import { BACKGROUND_PATTERN_NAME, backgroundOperators, setTemplateStyleKeyword, TEMPLATE_COLORS, type TemplateStyle } from '../templates';
+import {
+	BACKGROUND_PATTERN_NAME,
+	backgroundOperators,
+	parseTemplateStyleFromKeywords,
+	setTemplateStyleKeyword,
+	TEMPLATE_COLORS,
+	type TemplateStyle,
+} from '../templates';
 
 // Changing a page's background — blank, lined, dot grid — after the page
 // was made.
@@ -37,8 +44,11 @@ export async function setPageBackground(
 	const pages = target === 'all' ? doc.getPages() : [doc.getPage(target - 1)];
 	for (const page of pages) replaceBackground(doc, page, style, infinite);
 	// The note's own style, for the pages added to it next — when it is the
-	// whole note that changed, or a note of one page.
-	if (target === 'all' || count === 1) setTemplateStyleKeyword(doc, style);
+	// whole note that changed, or a note of one page. Only a note's: a book
+	// given lined pages is still a book, not a note of this plugin's, and
+	// marking it one would change what Add page puts in it.
+	const isNote = parseTemplateStyleFromKeywords(doc.getKeywords()) !== null;
+	if (isNote && (target === 'all' || count === 1)) setTemplateStyleKeyword(doc, style);
 	return { kind: 'changed', bytes: await doc.save(), pages: pages.length };
 }
 

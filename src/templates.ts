@@ -272,18 +272,36 @@ export function backgroundOperators(pdf: PDFDocument, page: PDFPage, style: Temp
 		return `/Pattern cs /${BACKGROUND_PATTERN} scn ${-extent} ${-extent} ${extent * 2} ${extent * 2} re f`;
 	}
 
-	const { x: left, y: bottom, width, height } = page.getMediaBox();
-	const top = bottom + height;
+	// Drawn the way the page is shown: a page turned a quarter (a scan read
+	// sideways, often) shows its own x axis down the screen, and lines drawn
+	// across the page itself would stand upright. So the ruling is laid out
+	// on the page as it appears — `width` by `height`, upright — and turned
+	// onto the page by the matrix that undoes the page's rotation.
+	const { x: left, y: bottom, width: pageWidth, height: pageHeight } = page.getMediaBox();
+	const rotation = ((page.getRotation().angle % 360) + 360) % 360;
+	const turned = rotation === 90 || rotation === 270;
+	const width = turned ? pageHeight : pageWidth;
+	const height = turned ? pageWidth : pageHeight;
+	const matrix =
+		rotation === 90
+			? [0, 1, -1, 0, left + pageWidth, bottom]
+			: rotation === 180
+				? [-1, 0, 0, -1, left + pageWidth, bottom + pageHeight]
+				: rotation === 270
+					? [0, -1, 1, 0, left, bottom + pageHeight]
+					: [1, 0, 0, 1, left, bottom];
+	const place = `${matrix.map(num).join(' ')} cm`;
+
 	if (style === 'lined') {
-		const lines = [`${colorOperands(RULE_COLOR)} RG`, `${num(RULE_THICKNESS)} w`];
-		for (let y = top - RULE_SPACING; y > bottom; y -= RULE_SPACING) {
-			lines.push(`${num(left)} ${num(y)} m ${num(left + width)} ${num(y)} l S`);
+		const lines = [place, `${colorOperands(RULE_COLOR)} RG`, `${num(RULE_THICKNESS)} w`];
+		for (let y = height - RULE_SPACING; y > 0; y -= RULE_SPACING) {
+			lines.push(`0 ${num(y)} m ${num(width)} ${num(y)} l S`);
 		}
 		return lines.join('\n');
 	}
-	const dots = [`${colorOperands(DOT_COLOR)} rg`];
-	for (let y = top - DOT_MARGIN; y > bottom + DOT_MARGIN; y -= DOT_SPACING) {
-		for (let x = left + DOT_MARGIN; x < left + width - DOT_MARGIN; x += DOT_SPACING) dots.push(circlePath(x, y, DOT_RADIUS), 'f');
+	const dots = [place, `${colorOperands(DOT_COLOR)} rg`];
+	for (let y = height - DOT_MARGIN; y > DOT_MARGIN; y -= DOT_SPACING) {
+		for (let x = DOT_MARGIN; x < width - DOT_MARGIN; x += DOT_SPACING) dots.push(circlePath(x, y, DOT_RADIUS), 'f');
 	}
 	return dots.join('\n');
 }

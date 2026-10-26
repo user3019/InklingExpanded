@@ -2,7 +2,7 @@ import { FileView, Menu, Notice, setIcon, setTooltip, TFile, WorkspaceLeaf } fro
 import { chooseDeviceFile, chooseVaultFile, PICTURE_EXTENSIONS, placePicture, preparePicture } from './importing';
 import { ANNOTATE_VIEW_TYPE, refreshCoreReaders } from './coreViews';
 import { AnnotationMode, getDocument, RenderingCancelledException, type PageViewport, type PDFDocumentProxy, type PDFPageProxy, type RenderTask } from 'pdfjs-dist';
-import { PDFDocument } from 'pdf-lib';
+import { PDFDocument, type PDFPage } from 'pdf-lib';
 import { AnnotationController, buildToolbar, HistoryStack, paletteFor, ToolState, type Annotation, type Point, type ToolType } from './annotate';
 import { HIGHLIGHTER_OPACITY } from './annotate/types';
 import { attachViewNavigation, type ViewZoom } from './annotate/pointer';
@@ -45,6 +45,15 @@ import {
 } from './templates';
 import { setPageBackground } from './pdf/pageBackground';
 import { backUp, type BackupReason } from './backups';
+
+// A page's size as it is seen: its crop box, the part a reader shows, turned
+// the way the page is turned — so a page added after it, upright and
+// uncropped, comes out the same shape on screen.
+function shownPageSize(page: PDFPage): [number, number] {
+	const { width, height } = page.getCropBox();
+	const turned = Math.abs(page.getRotation().angle) % 180 === 90;
+	return turned ? [height, width] : [width, height];
+}
 
 // The menu's icons for each background.
 const BACKGROUND_ICONS: Record<TemplateStyle, string> = { blank: 'square', lined: 'align-justify', 'dot-grid': 'grip' };
@@ -1004,9 +1013,11 @@ export class PdfAnnotateView extends FileView {
 		// growth below only ever reasons about page 1.
 		this.infiniteBox = isInfiniteCanvasKeywords(keywords) && pdf.numPages === 1 ? boxFromView(firstPage.view) : null;
 		this.contentEl.toggleClass('is-infinite', this.infiniteBox !== null);
-		// "Add page" means nothing on a sheet that grows by itself.
-		this.controller.setCanManagePages(parseTemplateStyleFromKeywords(keywords) !== null && this.infiniteBox === null);
-		this.controller.setIsNote(parseTemplateStyleFromKeywords(keywords) !== null);
+		// "Add page" works on any PDF — a note this plugin made, or a book or
+		// a handout from anywhere else — and means nothing only on a sheet
+		// that grows by itself.
+		this.controller.setCanManagePages(this.infiniteBox === null);
+		this.controller.setCanChangeBackground(true);
 		// A canvas is laid out at its real size from the start rather than at
 		// an estimate: it is usually far from the size of a page, and an
 		// estimate would jump when the real one arrived.
@@ -1768,14 +1779,20 @@ export class PdfAnnotateView extends FileView {
 			new Notice('InklingExpanded: an infinite canvas grows by itself and cannot have more pages.');
 			return;
 		}
-		await this.rebuild('add-page', 'could not add a page to this note.', async (bytes) => {
+		await this.rebuild('add-page', 'could not add a page to this PDF.', async (bytes) => {
 			const pdfDoc = await PDFDocument.load(bytes);
 			// currentPageNumber is 1-based; as a 0-based insertion index that
 			// is exactly "right after the page the user is currently on".
 			const insertIndex = Math.min(this.currentPageNumber, pdfDoc.getPageCount());
-			const style = readTemplateStyle(pdfDoc);
-			const newPage = pdfDoc.insertPage(insertIndex, pageSizeFor(this.getSettings().pageSize));
-			applyTemplateStyle(newPage, style);
+			// A note this plugin made gets a page of its paper size and ruling.
+			// Any other PDF gets a blank page the size of the one on screen, so
+			// a page added to a book or a handout fits in with its own.
+			if (parseTemplateStyleFromKeywords(pdfDoc.getKeywords()) !== null) {
+				const newPage = pdfDoc.insertPage(insertIndex, pageSizeFor(this.getSettings().pageSize));
+				applyTemplateStyle(newPage, readTemplateStyle(pdfDoc));
+			} else {
+				pdfDoc.insertPage(insertIndex, shownPageSize(pdfDoc.getPage(Math.max(insertIndex - 1, 0))));
+			}
 			return { bytes: toArrayBuffer(await pdfDoc.save()), scrollTo: insertIndex + 1 };
 		});
 	}

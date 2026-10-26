@@ -46,9 +46,12 @@ plugin makes no network connections.
 - **Infinite canvas.** Choose "Infinite canvas" when creating a note: one sheet
   that grows smoothly in whichever direction you write, without reloading.
   Still an ordinary one-page PDF that opens anywhere.
-- **Page background, after the fact.** Switch any page — or every page — between
-  blank, lined and dot grid. Imported pages keep their content; the ruling goes
-  underneath.
+- **Page background, after the fact, in any PDF.** Switch any page — or every
+  page — between blank, lined and dot grid. Pages with content keep it, with
+  the ruling underneath, and a page turned sideways is ruled the way it is
+  shown.
+- **Add pages to any PDF** — not only notes made by the plugin. In a book or a
+  handout the new page is blank and the size of the page you are on.
 - **Delete pages** from the page thumbnails in Obsidian's own PDF reader (long
   press on a tablet, right-click on a desktop).
 - **Page counts and thumbnails update** in Obsidian's reader as soon as pages
