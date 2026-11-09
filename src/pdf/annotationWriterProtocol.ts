@@ -44,7 +44,7 @@ interface OpenedOk {
 	ok: true;
 	savedAnnotations: Map<number, Annotation[]>;
 	// What pdf.js should render: the file with only InklingExpanded's own
-	// annotations stripped out (see stripInklingAnnotations), so its default
+	// annotations left off its pages (see displayCopyOf), so its default
 	// annotation-baking render still shows annotations from other PDF
 	// software without doubling up with our own live overlay.
 	displayBytes: ArrayBuffer;

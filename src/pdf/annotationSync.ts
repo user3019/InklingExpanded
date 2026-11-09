@@ -594,15 +594,6 @@ function inklingAnnotationRefs(pdfDoc: PDFDocument, page: PDFPage): PDFRef[] {
 	return refs;
 }
 
-function removeInklingAnnotations(pdfDoc: PDFDocument, page: PDFPage): boolean {
-	const toRemove = inklingAnnotationRefs(pdfDoc, page);
-	for (const ref of toRemove) {
-		page.node.removeAnnot(ref);
-		deleteAnnotationObjects(pdfDoc, ref);
-	}
-	return toRemove.length > 0;
-}
-
 // ---- Deciding what a save has to rewrite ----
 
 // How far apart two coordinates can be and still be the same mark, in PDF
@@ -825,25 +816,6 @@ export function writeInklingAnnotations(
 	// Again afterwards: normalize() may have replaced an indirect slot with a
 	// direct one, or created the /Annots array that did not exist before.
 	touchPageContainers(page, touch);
-}
-
-// Builds a display-only copy for pdf.js to render from: our own InklingExpanded
-// annotations stripped out, everything else — crucially, annotations from
-// other PDF software (Xodo, Acrobat, ...) — left exactly as they were.
-// pdf.js's default annotation-baking render (see src/pdfView.ts) has no way
-// to selectively bake some annotations and not others, so this exists to
-// keep it from doubling up with our own live overlay of *our* annotations
-// while still letting it show *foreign* ones, which we never render
-// ourselves. Returns whether anything was actually stripped, so the caller
-// (annotationWriter.worker.ts) can skip building this copy — and paying for
-// its own save() — entirely for the common case of a file with no InklingExpanded
-// annotations yet.
-export function stripInklingAnnotations(pdfDoc: PDFDocument): boolean {
-	let removedAny = false;
-	for (const page of pdfDoc.getPages()) {
-		if (removeInklingAnnotations(pdfDoc, page)) removedAny = true;
-	}
-	return removedAny;
 }
 
 // A one-time sweep for damage from before deleteAnnotationObjects existed:

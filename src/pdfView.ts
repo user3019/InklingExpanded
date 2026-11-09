@@ -83,7 +83,7 @@ const PAGE_NUMBER_ATTR = 'pageNumber';
 const SLOW_OPEN_MS = 1500;
 // The longest the picture of the old pages stays up if the new ones never
 // arrive — a page that fails to render must not leave the view frozen.
-const RELOAD_COVER_MAX_MS = 2500;
+const RELOAD_COVER_MAX_MS = 8000;
 
 // How many pages either side of the visible ones keep their canvases once
 // scrolled past; anything beyond is torn back down to its placeholder and
@@ -95,6 +95,22 @@ const RELOAD_COVER_MAX_MS = 2500;
 // aren't affected: they live in the controller's store, keyed by page, and
 // are redrawn from it whenever a page mounts again.
 const PAGE_RETAIN_MARGIN = 3;
+// On a phone or tablet a page and its ink are two canvases of up to 32 MB
+// each at the screen's density, and there is far less memory to hold them in.
+const PAGE_RETAIN_MARGIN_MOBILE = 1;
+
+// How many pages are drawn at once. Two rather than one so that a page which
+// has just scrolled away cannot hold up the one now on screen; no more,
+// because they share one thread and more only slows each of them.
+const MAX_CONCURRENT_RENDERS = 2;
+// Reading a page's text is for the highlighter, and waits for the pictures.
+const TEXT_LINES_DELAY_MS = 250;
+
+// A page being drawn, for calling it off.
+interface RenderJob {
+	task: RenderTask | null;
+	cancelled: boolean;
+}
 
 // How long to wait after the last edit before writing annotations into the
 // file — pdf-lib's rewrites aren't incremental, so batching rapid
@@ -479,6 +495,15 @@ export class PdfAnnotateView extends FileView {
 	// page's render (see computeTextLines) and used to snap freehand
 	// highlighter strokes straight (see snapHighlighterStroke).
 	private textLines = new Map<number, TextLine[]>();
+	private readonly textWaiting = new Map<number, { page: PDFPageProxy; viewport: PageViewport }>();
+	private textHandle: number | null = null;
+	// Pages wanting a first drawing, nearest the reader first (see
+	// pumpRenders), and the ones being drawn.
+	private readonly renderWaiting = new Map<number, HTMLElement>();
+	private readonly renderJobs = new Map<number, RenderJob>();
+	// By page, so finding one does not search the whole book on every frame
+	// of a scroll.
+	private placeholders: HTMLElement[] = [];
 	// Annotations read back from the file at open time, in PDF space,
 	// seeded into the controller as each page mounts.
 	private savedAnnotations = new Map<number, Annotation[]>();
@@ -1084,8 +1109,11 @@ export class PdfAnnotateView extends FileView {
 		// A canvas is laid out at its real size from the start rather than at
 		// an estimate: it is usually far from the size of a page, and an
 		// estimate would jump when the real one arrived.
+		// A page is laid out fitted to the pane the same way, so each sheet
+		// starts at the size it will keep: at a flat estimate every page
+		// changed height as it finished, and pushed the ones below it along.
 		const estimatedViewport = firstPage.getViewport({
-			scale: this.infiniteBox ? this.layoutScaleFor(1, INFINITE_BASE_WIDTH) : RENDER_SCALE,
+			scale: this.layoutScaleFor(1, this.infiniteBox ? INFINITE_BASE_WIDTH : firstPage.getViewport({ scale: 1 }).width),
 		});
 
 		// Stays subscribed to every placeholder for the life of the view
@@ -1123,6 +1151,7 @@ export class PdfAnnotateView extends FileView {
 			// pointer-events: none in styles.css so it can never swallow a
 			// stroke that starts on top of it.
 			placeholder.createDiv({ cls: 'inkling-page-number', text: String(pageNumber) });
+			this.placeholders.push(placeholder);
 			observer.observe(placeholder);
 		}
 
@@ -1185,6 +1214,12 @@ export class PdfAnnotateView extends FileView {
 	private teardown() {
 		this.observer?.disconnect();
 		this.observer = null;
+		for (const pageNumber of [...this.renderJobs.keys()]) this.cancelRender(pageNumber);
+		this.renderWaiting.clear();
+		this.placeholders = [];
+		this.textWaiting.clear();
+		if (this.textHandle !== null) window.clearTimeout(this.textHandle);
+		this.textHandle = null;
 		this.renderedPages.clear();
 		this.seededPages.clear();
 		this.visiblePages.clear();
@@ -1264,15 +1299,103 @@ export class PdfAnnotateView extends FileView {
 				this.visiblePages.add(pageNumber);
 				if (!this.renderedPages.has(pageNumber)) {
 					this.renderedPages.add(pageNumber);
-					void this.renderPage(placeholder, pageNumber, token);
+					this.renderWaiting.set(pageNumber, placeholder);
 				}
 			} else {
 				this.visiblePages.delete(pageNumber);
+				// Flown past before it was drawn: not worth drawing now, and
+				// drawing it would keep the page landed on waiting.
+				if (this.renderWaiting.has(pageNumber) || this.renderJobs.has(pageNumber)) {
+					this.cancelRender(pageNumber);
+					this.renderedPages.delete(pageNumber);
+				}
 			}
 		}
 
 		this.updateCurrentPage();
 		this.releaseDistantPages();
+		this.pumpRenders(token);
+	}
+
+	private cancelRender(pageNumber: number): void {
+		this.renderWaiting.delete(pageNumber);
+		const job = this.renderJobs.get(pageNumber);
+		if (!job) return;
+		job.cancelled = true;
+		job.task?.cancel();
+		this.renderJobs.delete(pageNumber);
+	}
+
+	// The page in `pages` nearest the one being read, and of two as near, the
+	// one further on, which is the way people read.
+	private nearestPage(pages: Iterable<number>): number | null {
+		let best: number | null = null;
+		let bestDistance = Infinity;
+		for (const page of pages) {
+			const distance = Math.abs(page - this.currentPageNumber);
+			if (distance < bestDistance || (distance === bestDistance && best !== null && page > best)) {
+				best = page;
+				bestDistance = distance;
+			}
+		}
+		return best;
+	}
+
+	// Starts as many waiting pages as there are free slots. pdf.js would
+	// take them in the order asked, so after a fast flick the page landed on
+	// used to wait behind every page flown past on the way.
+	private pumpRenders(token: number): void {
+		while (token === this.renderToken && this.renderJobs.size < MAX_CONCURRENT_RENDERS) {
+			const pageNumber = this.nearestPage(this.renderWaiting.keys());
+			const placeholder = pageNumber === null ? undefined : this.renderWaiting.get(pageNumber);
+			if (pageNumber === null || !placeholder) return;
+			this.renderWaiting.delete(pageNumber);
+			const job: RenderJob = { task: null, cancelled: false };
+			this.renderJobs.set(pageNumber, job);
+			void this.renderPage(placeholder, pageNumber, token, job).finally(() => {
+				if (this.renderJobs.get(pageNumber) === job) this.renderJobs.delete(pageNumber);
+				this.pumpRenders(token);
+				this.scheduleTextLines();
+			});
+		}
+	}
+
+	private queueTextLines(pageNumber: number, page: PDFPageProxy, viewport: PageViewport): void {
+		this.textWaiting.set(pageNumber, { page, viewport });
+		this.scheduleTextLines();
+	}
+
+	private scheduleTextLines(): void {
+		if (this.textHandle !== null || this.textWaiting.size === 0) return;
+		this.textHandle = window.setTimeout(() => {
+			this.textHandle = null;
+			this.readNextTextLines();
+		}, TEXT_LINES_DELAY_MS);
+	}
+
+	// One page at a time, and only with no page waiting to be seen. A
+	// highlighter stroke made before this gets to its page falls back to
+	// freehand (see snapHighlighterStroke).
+	private readNextTextLines(): void {
+		if (this.renderJobs.size > 0 || this.renderWaiting.size > 0) {
+			this.scheduleTextLines();
+			return;
+		}
+		const pageNumber = this.nearestPage(this.textWaiting.keys());
+		const waiting = pageNumber === null ? undefined : this.textWaiting.get(pageNumber);
+		if (pageNumber === null || !waiting) return;
+		this.textWaiting.delete(pageNumber);
+		const token = this.renderToken;
+		computeTextLines(waiting.page, waiting.viewport)
+			.then((lines) => {
+				// Only for the scale the page is still at: the lines are in
+				// its canvas space.
+				if (token === this.renderToken && this.viewports.get(pageNumber) === waiting.viewport) this.textLines.set(pageNumber, lines);
+			})
+			.catch((error: unknown) => {
+				console.error(`InklingExpanded: failed to read text content for PDF page ${pageNumber}.`, error);
+			})
+			.finally(() => this.scheduleTextLines());
 	}
 
 	// Batched to one measurement a frame; scroll events come far faster.
@@ -1299,9 +1422,7 @@ export class PdfAnnotateView extends FileView {
 		let best: number | null = null;
 		let bestShown = 0;
 		for (const pageNumber of [...this.visiblePages].sort((a, b) => a - b)) {
-			const placeholder = this.contentEl.querySelector<HTMLElement>(
-				`.inkling-pdf-page-placeholder[data-page-number="${pageNumber}"]`,
-			);
+			const placeholder = this.placeholderOf(pageNumber);
 			if (!placeholder) continue;
 			const rect = placeholder.getBoundingClientRect();
 			const shown = Math.min(rect.bottom, container.bottom) - Math.max(rect.top, container.top);
@@ -1333,8 +1454,9 @@ export class PdfAnnotateView extends FileView {
 	private releaseDistantPages(): void {
 		if (this.visiblePages.size === 0) return;
 
-		const lowest = Math.min(...this.visiblePages) - PAGE_RETAIN_MARGIN;
-		const highest = Math.max(...this.visiblePages) + PAGE_RETAIN_MARGIN;
+		const margin = this.contentEl.ownerDocument.body.classList.contains('is-mobile') ? PAGE_RETAIN_MARGIN_MOBILE : PAGE_RETAIN_MARGIN;
+		const lowest = Math.min(...this.visiblePages) - margin;
+		const highest = Math.max(...this.visiblePages) + margin;
 
 		for (const pageNumber of [...this.renderedPages]) {
 			if (pageNumber >= lowest && pageNumber <= highest) continue;
@@ -1348,9 +1470,9 @@ export class PdfAnnotateView extends FileView {
 	}
 
 	private releasePage(pageNumber: number): void {
-		const placeholder = this.contentEl.querySelector<HTMLElement>(
-			`.inkling-pdf-page-placeholder[data-page-number="${pageNumber}"]`,
-		);
+		const placeholder = this.placeholderOf(pageNumber);
+		this.cancelRender(pageNumber);
+		this.textWaiting.delete(pageNumber);
 		this.removeDetail(pageNumber);
 		placeholder?.querySelector('.inkling-page-content')?.remove();
 
@@ -1366,7 +1488,7 @@ export class PdfAnnotateView extends FileView {
 		// the canvases were the memory that mattered.
 	}
 
-	private async renderPage(placeholder: HTMLElement, pageNumber: number, token: number) {
+	private async renderPage(placeholder: HTMLElement, pageNumber: number, token: number, job: RenderJob) {
 		const pdf = this.pdf;
 		if (!pdf) return;
 
@@ -1382,7 +1504,7 @@ export class PdfAnnotateView extends FileView {
 			}
 			return;
 		}
-		if (token !== this.renderToken) return;
+		if (token !== this.renderToken || job.cancelled) return;
 
 		// Re-rendering a page that was recycled (see releasePage) reuses the
 		// scale it last had, not the default: annotations for that page are
@@ -1420,7 +1542,11 @@ export class PdfAnnotateView extends FileView {
 		// list of pages or overlaps its neighbors. The pdf page canvas and
 		// both annotation layers all live inside it, so they zoom and pan
 		// together as one picture.
-		const content = placeholder.createDiv({ cls: 'inkling-page-content' });
+		//
+		// Built off the page and put on it whole. pdf.js paints in stages, and
+		// a canvas on the page shows each stage: text, then pictures, then the
+		// ink a moment after that.
+		const content = createDiv({ cls: 'inkling-page-content' });
 
 		const canvas = content.createEl('canvas', { cls: 'inkling-pdf-page' });
 		canvas.width = viewport.width;
@@ -1435,24 +1561,22 @@ export class PdfAnnotateView extends FileView {
 			// has only *our* annotations stripped out (see its comment), so
 			// they render exclusively — and always currently — through our
 			// own live overlay instead.
-			await page.render({ canvas, viewport, annotationMode: AnnotationMode.ENABLE }).promise;
+			const task = page.render({ canvas, viewport, annotationMode: AnnotationMode.ENABLE });
+			job.task = task;
+			await task.promise;
 		} catch (error) {
-			// Expected when the view is torn down (file switched/closed) while
-			// a scrolled-past page was still rendering — the in-flight task
-			// gets cancelled along with the rest of the document.
-			if (!(error instanceof RenderingCancelledException)) {
-				console.error(`InklingExpanded: failed to render PDF page ${pageNumber}.`, error);
-				// Left to be tried again when it next scrolls into view, rather
-				// than blank for as long as the file is open.
-				if (token === this.renderToken) {
-					content.remove();
-					this.renderedPages.delete(pageNumber);
-				}
-				return;
-			}
+			// Expected when the page is flown past or the view torn down while
+			// it was still being drawn.
+			if (error instanceof RenderingCancelledException) return;
+			console.error(`InklingExpanded: failed to render PDF page ${pageNumber}.`, error);
+			// Left to be tried again when it next scrolls into view, rather
+			// than blank for as long as the file is open.
+			if (token === this.renderToken && !job.cancelled) this.renderedPages.delete(pageNumber);
+			return;
 		}
 
-		if (token !== this.renderToken) return;
+		if (token !== this.renderToken || job.cancelled) return;
+		placeholder.appendChild(content);
 		this.viewports.set(pageNumber, viewport);
 		this.pageCanvases.set(pageNumber, canvas);
 		// The scale it was actually rendered at, which is not always the base
@@ -1481,17 +1605,9 @@ export class PdfAnnotateView extends FileView {
 		this.scheduleDetails();
 		this.dropReloadCoverIfReady();
 
-		// Not awaited — a highlighter stroke drawn before this resolves just
-		// falls back to committing as freehand (see snapHighlighterStroke),
-		// rather than holding up the page's actual render/mount on text
-		// extraction it may never even need.
-		computeTextLines(page, viewport)
-			.then((lines) => {
-				if (token === this.renderToken) this.textLines.set(pageNumber, lines);
-			})
-			.catch((error: unknown) => {
-				console.error(`InklingExpanded: failed to read text content for PDF page ${pageNumber}.`, error);
-			});
+		// A recycled page comes back at the scale it left at, so what was
+		// read from it before still holds.
+		if (!this.textLines.has(pageNumber)) this.queueTextLines(pageNumber, page, viewport);
 	}
 
 	// The scale to back a page's canvas at, the first time it is rendered.
@@ -1614,6 +1730,10 @@ export class PdfAnnotateView extends FileView {
 
 			this.viewports.set(pageNumber, newViewport);
 			this.renderedScales.set(pageNumber, targetScale);
+			// In the old scale's canvas space, where a highlighter stroke no
+			// longer lines up with them.
+			this.textLines.delete(pageNumber);
+			this.queueTextLines(pageNumber, page, newViewport);
 		} catch (error) {
 			if (!(error instanceof RenderingCancelledException)) {
 				console.error(`InklingExpanded: failed to sharpen PDF page ${pageNumber} for zoom.`, error);
@@ -2084,7 +2204,7 @@ export class PdfAnnotateView extends FileView {
 
 	private async renderDetail(pageNumber: number): Promise<void> {
 		const pdf = this.pdf;
-		const placeholder = this.contentEl.querySelector<HTMLElement>(`.inkling-pdf-page-placeholder[data-page-number="${pageNumber}"]`);
+		const placeholder = this.placeholderOf(pageNumber);
 		const viewport = this.viewports.get(pageNumber);
 		if (!pdf || !placeholder || !viewport) return;
 
@@ -3116,7 +3236,7 @@ export class PdfAnnotateView extends FileView {
 		if (this.controller.isReadOnly()) return;
 		const pageNumber = this.currentPageNumber;
 		const viewport = this.viewports.get(pageNumber);
-		const placeholder = this.contentEl.querySelector<HTMLElement>(`.inkling-pdf-page-placeholder[data-page-number="${pageNumber}"]`);
+		const placeholder = this.placeholderOf(pageNumber);
 		if (!viewport || !placeholder) return;
 
 		let picture;
@@ -3402,9 +3522,7 @@ export class PdfAnnotateView extends FileView {
 	private editNote(pageNumber: number, point: Point, existing: string): Promise<string | null> {
 		this.closeNoteEditor();
 
-		const placeholder = this.contentEl.querySelector<HTMLElement>(
-			`.inkling-pdf-page-placeholder[data-page-number="${pageNumber}"]`,
-		);
+		const placeholder = this.placeholderOf(pageNumber);
 		if (!placeholder) return Promise.resolve(null);
 
 		return new Promise<string | null>((resolve) => {
@@ -3703,7 +3821,7 @@ export class PdfAnnotateView extends FileView {
 	}
 
 	private placeholderOf(pageNumber: number): HTMLElement | null {
-		return this.contentEl.querySelector<HTMLElement>(`.inkling-pdf-page-placeholder[data-page-number="${pageNumber}"]`);
+		return this.placeholders[pageNumber - 1] ?? this.contentEl.querySelector<HTMLElement>(`.inkling-pdf-page-placeholder[data-page-number="${pageNumber}"]`);
 	}
 
 	// Taken down the moment every page on screen is drawn again.
@@ -3725,9 +3843,6 @@ export class PdfAnnotateView extends FileView {
 	}
 
 	private scrollToPage(pageNumber: number): void {
-		const placeholder = this.contentEl.querySelector<HTMLElement>(
-			`.inkling-pdf-page-placeholder[data-page-number="${pageNumber}"]`,
-		);
-		placeholder?.scrollIntoView({ block: 'center' });
+		this.placeholderOf(pageNumber)?.scrollIntoView({ block: 'center' });
 	}
 }
