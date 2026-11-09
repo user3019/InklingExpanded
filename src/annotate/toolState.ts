@@ -1,5 +1,5 @@
 import { defaultToolbarLayout, normalizeToolbarLayout, toolbarLayoutsEqual, type ToolbarLayout } from './toolbarLayout';
-import { DEFAULT_COLOR, DEFAULT_WIDTH, MAX_WIDTH, MIN_WIDTH, ToolType, defaultStyleFor, isPenBrush, type PenBrush } from './types';
+import { DEFAULT_COLOR, DEFAULT_WIDTH, MAX_WIDTH, MIN_WIDTH, ToolType, defaultStyleFor, isPenBrush, type LineDash, type PenBrush } from './types';
 
 export interface ToolStyle {
 	color: string;
@@ -19,7 +19,15 @@ export interface ToolStyle {
 export type ToolStateChange = 'tool' | 'style' | 'chrome' | 'layout';
 
 // Every tool there is, for reading a stored one back.
-const TOOLS: readonly ToolType[] = ['select', 'pen', 'highlighter', 'eraser', 'note', 'line', 'rectangle', 'oval', 'arrow'];
+const TOOLS: readonly ToolType[] = ['select', 'pen', 'highlighter', 'eraser', 'note', 'text', 'line', 'rectangle', 'oval', 'arrow'];
+
+// How the shape tools draw (see the shape picker): shared by all four, the
+// way a line style in a drawing program is.
+export interface ShapeOptions {
+	dash: LineDash | 'solid';
+	filled: boolean;
+	bothEnds: boolean;
+}
 const HEX_COLOR = /^#[0-9a-f]{6}$/i;
 
 // The pen as the user left it — which tool is in hand, and the colour and
@@ -31,6 +39,7 @@ export interface ToolStateSnapshot {
 	brush: PenBrush;
 	pressure: Record<PenBrush, boolean>;
 	touchDrawing: boolean;
+	shapes: ShapeOptions;
 	// Keyed by tool, and for the pen by nib as well (see styleKey).
 	styles: Record<string, ToolStyle>;
 }
@@ -102,6 +111,7 @@ export class ToolState {
 	// that reports itself as a finger — passive styluses, and some Android
 	// tablets' own — and for drawing on a phone with no stylus at all.
 	private touchDrawing = false;
+	private shapeOptions: ShapeOptions = { dash: 'solid', filled: false, bothEnds: false };
 	// Whether the tool strip is collapsed to a single row. Lives here
 	// rather than in a toolbar, for the same reason the pen does: an ink
 	// block's toolbar is destroyed and rebuilt on every save, so a strip
@@ -179,7 +189,15 @@ export class ToolState {
 	snapshot(): ToolStateSnapshot {
 		const styles: Record<string, ToolStyle> = {};
 		for (const [key, style] of this.styles) styles[key] = { ...style };
-		return { tool: this.tool, chosen: this.toolChosen, brush: this.brush, pressure: { ...this.pressure }, touchDrawing: this.touchDrawing, styles };
+		return {
+			tool: this.tool,
+			chosen: this.toolChosen,
+			brush: this.brush,
+			pressure: { ...this.pressure },
+			touchDrawing: this.touchDrawing,
+			shapes: { ...this.shapeOptions },
+			styles,
+		};
 	}
 
 	// Puts back a snapshot read from storage. Whatever is stored was written
@@ -205,6 +223,14 @@ export class ToolState {
 		}
 		this.brush = isPenBrush(stored.brush) ? stored.brush : 'pen';
 		this.touchDrawing = (raw as { touchDrawing?: unknown }).touchDrawing === true;
+		const shapes = (raw as { shapes?: Partial<Record<keyof ShapeOptions, unknown>> }).shapes;
+		if (shapes) {
+			this.shapeOptions = {
+				dash: shapes.dash === 'dashed' || shapes.dash === 'dotted' ? shapes.dash : 'solid',
+				filled: shapes.filled === true,
+				bothEnds: shapes.bothEnds === true,
+			};
+		}
 
 		const tool = (TOOLS as readonly string[]).includes(stored.tool as string) ? (stored.tool as ToolType) : this.tool;
 		this.tool = tool;
@@ -257,6 +283,16 @@ export class ToolState {
 
 	getBrush(): PenBrush {
 		return this.brush;
+	}
+
+	getShapeOptions(): ShapeOptions {
+		return this.shapeOptions;
+	}
+
+	// 'style': it changes what the next shape looks like.
+	setShapeOptions(change: Partial<ShapeOptions>): void {
+		this.shapeOptions = { ...this.shapeOptions, ...change };
+		this.notify('style');
 	}
 
 	getPressure(brush: PenBrush = this.brush): boolean {

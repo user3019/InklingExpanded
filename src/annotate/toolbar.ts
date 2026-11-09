@@ -4,7 +4,8 @@ import { AnnotationController } from './controller';
 import { toolbarItemSpec, type ToolbarItemId, type ToolbarLayout } from './toolbarLayout';
 import { ToolbarLayoutModal } from './toolbarLayoutModal';
 import { openPenPicker, PEN_BRUSH_INFO } from './penPicker';
-import { MAX_WIDTH, MIN_WIDTH, ToolType, paletteFor } from './types';
+import { openShapePicker } from './shapePicker';
+import { MAX_WIDTH, MIN_WIDTH, ToolType, paletteFor, type ShapeToolType } from './types';
 
 // One press of the toolbar's zoom buttons. A ratio rather than a step, for
 // the same reason the wheel uses one: the same press should cover the same
@@ -28,7 +29,8 @@ interface ButtonSpec {
 	title: string;
 }
 
-const TOOLS: readonly ToolType[] = ['select', 'pen', 'highlighter', 'eraser', 'note', 'line', 'rectangle', 'oval', 'arrow'];
+const TOOLS: readonly ToolType[] = ['select', 'pen', 'highlighter', 'eraser', 'note', 'text', 'line', 'rectangle', 'oval', 'arrow'];
+const SHAPE_TOOLS: readonly ToolType[] = ['line', 'rectangle', 'oval', 'arrow'];
 
 // The button for one of the strip's items, from the one table that names
 // them (see toolbarLayout.ts), so the strip and its layout editor cannot
@@ -126,10 +128,26 @@ export function buildToolbar(host: HTMLElement, controller: AnnotationController
 			button.setAttribute('aria-expanded', 'false');
 		});
 	};
+	// The shapes work the same way: their line style is on a second press.
+	const onShapePressed = (button: HTMLButtonElement, tool: ShapeToolType) => {
+		if (closePenPicker) {
+			closePenPicker();
+			return;
+		}
+		if (controller.getTool() !== tool) {
+			controller.setTool(tool);
+			return;
+		}
+		closePenPicker = openShapePicker(button, controller, tool, () => {
+			closePenPicker = null;
+		});
+	};
 	for (const tool of TOOLS) {
-		const button: HTMLButtonElement = itemButton('inkling-tool-button', tool, () =>
-			tool === 'pen' ? onPenPressed(button) : controller.setTool(tool),
-		);
+		const button: HTMLButtonElement = itemButton('inkling-tool-button', tool, () => {
+			if (tool === 'pen') onPenPressed(button);
+			else if (SHAPE_TOOLS.includes(tool)) onShapePressed(button, tool as ShapeToolType);
+			else controller.setTool(tool);
+		});
 		toolButtons.set(tool, button);
 		items.set(tool, button);
 	}
@@ -223,12 +241,11 @@ export function buildToolbar(host: HTMLElement, controller: AnnotationController
 	const redoButton = itemButton('inkling-tool-button', 'redo', () => controller.redo());
 	const deleteButton = itemButton('inkling-tool-button', 'delete', () => controller.deleteSelection());
 	const clearPageButton = itemButton('inkling-tool-button', 'clear-page', () => controller.clearCurrentPage());
-	// Only meaningful for plugin-created handwritten notes — hidden for
-	// imported PDFs (books, papers, ...) via the refresh() below, since
-	// there's no notion of "add a blank/lined/dot-grid page" to a book.
+	// Any PDF but an infinite canvas, which grows by itself — see refresh().
 	const addPageButton = itemButton('inkling-tool-button', 'add-page', () => controller.addPage());
-	// The page's ruling, changed after the fact. A note's, like Add page.
+	// The page's ruling, changed after the fact, in any PDF.
 	const backgroundButton: HTMLButtonElement = itemButton('inkling-tool-button', 'background', () => controller.openBackground(backgroundButton));
+	const pagesButton = itemButton('inkling-tool-button', 'pages', () => controller.openManagePages());
 	// PDF pages and pictures, into a PDF. Only where the host offers it.
 	const importButton: HTMLButtonElement = itemButton('inkling-tool-button', 'import', () => controller.openImport(importButton));
 	// Darkens the page under the ink. A reading action like zoom, so it
@@ -243,6 +260,7 @@ export function buildToolbar(host: HTMLElement, controller: AnnotationController
 	items.set('clear-page', clearPageButton);
 	items.set('add-page', addPageButton);
 	items.set('background', backgroundButton);
+	items.set('pages', pagesButton);
 	items.set('import', importButton);
 	items.set('invert', invertButton);
 	items.set('outline', navButton);
@@ -375,7 +393,7 @@ export function buildToolbar(host: HTMLElement, controller: AnnotationController
 		const noteButton = toolButtons.get('note');
 		if (noteButton && !controller.canTakeNotes()) noteButton.hidden = true;
 		for (const group of [colorGroup, widthGroup, pageGroup, zoomGroup, spacer, ...separators]) group.hidden = collapsed;
-		for (const button of [redoButton, deleteButton, clearPageButton, addPageButton, backgroundButton, importButton, invertButton, navButton, touchDrawButton]) {
+		for (const button of [redoButton, deleteButton, clearPageButton, addPageButton, backgroundButton, pagesButton, importButton, invertButton, navButton, touchDrawButton]) {
 			button.hidden = collapsed;
 		}
 		const touchDrawing = controller.isTouchDrawing();
@@ -468,6 +486,7 @@ export function buildToolbar(host: HTMLElement, controller: AnnotationController
 		if (!collapsed) {
 			addPageButton.hidden = !controller.getCanManagePages();
 			backgroundButton.hidden = !controller.canChangeBackground();
+			pagesButton.hidden = !controller.canOpenManagePages();
 			importButton.hidden = !controller.canImport();
 			navButton.hidden = !controller.canToggleNavigation();
 			invertButton.hidden = !controller.canInvert();
@@ -475,6 +494,7 @@ export function buildToolbar(host: HTMLElement, controller: AnnotationController
 		invertButton.toggleClass('is-active', controller.isInverted());
 		addPageButton.disabled = readOnly;
 		backgroundButton.disabled = readOnly;
+		pagesButton.disabled = readOnly;
 		importButton.disabled = readOnly;
 	};
 	refresh();

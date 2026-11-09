@@ -50,6 +50,8 @@ const CONTEXT_METHODS = [
 	'roundRect',
 	'setLineDash',
 	'setTransform',
+	'drawImage',
+	'fillText',
 	'translate',
 	'scale',
 ] as const;

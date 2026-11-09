@@ -29,6 +29,10 @@ export const INKLING_EXTRAS = 'Inkling';
 // file size, and these arrays are as long as the stroke is.
 export const PRESSURE_KEY = 'P';
 
+// Typed text's top-left corner, font size and colour, as numbers. All of
+// them are in the appearance stream too, but not in a form to read back.
+export const TEXT_KEY = 'T';
+
 // The nib a pen stroke was drawn with (see PenBrush in annotate/types.ts),
 // as a name. Only written for a nib other than the plain pen, so a file
 // with no such strokes is byte for byte what it always was. Another reader

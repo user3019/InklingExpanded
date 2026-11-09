@@ -1,4 +1,5 @@
 import { PDFDocument, type PDFObject, type PDFRef } from 'pdf-lib';
+import { loadSpeed, saveSpeed } from './pdfLibSpeed';
 import { toArrayBuffer } from '../binary';
 import { buildIncrementalUpdate, documentId, reserveObjectNumbers } from './appendUpdate';
 import { recordChanges, type TouchFn } from './changeSet';
@@ -110,7 +111,7 @@ export function abandonIncremental(session: IncrementalSession, reason: string):
 }
 
 async function fullSave(doc: PDFDocument, session: IncrementalSession, intended: DocumentFingerprint): Promise<SaveOutcome> {
-	const bytes = await doc.save();
+	const bytes = await doc.save(saveSpeed());
 
 	// The existing guard, unchanged: reparsing the bytes we are about to hand
 	// back is what makes a silent pdf-lib fault loud.
@@ -118,7 +119,7 @@ async function fullSave(doc: PDFDocument, session: IncrementalSession, intended:
 	// updateMetadata: false because this parse is read-only; letting it stamp
 	// a new ModDate would make the verification copy differ from the bytes
 	// actually being written.
-	const written = await PDFDocument.load(toArrayBuffer(bytes), { updateMetadata: false });
+	const written = await PDFDocument.load(toArrayBuffer(bytes), { updateMetadata: false, ...loadSpeed() });
 	const difference = compareFingerprints(intended, fingerprintDocument(written));
 	if (difference) {
 		// Thrown, never returned alongside the bytes: there must be no path
@@ -218,7 +219,7 @@ export async function saveIncrementally(
 
 	let reparsed: PDFDocument;
 	try {
-		reparsed = await PDFDocument.load(toArrayBuffer(candidate), { updateMetadata: false });
+		reparsed = await PDFDocument.load(toArrayBuffer(candidate), { updateMetadata: false, ...loadSpeed() });
 		const difference = compareFingerprints(intended, fingerprintDocument(reparsed));
 		if (difference) {
 			declineOnce(session, `the appended file did not verify (${difference})`);

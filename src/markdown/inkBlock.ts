@@ -387,6 +387,7 @@ class InkBlockView implements StorageHost {
 			// rebuilt by its own save. See retainedHistories.
 			history: this.retained.history,
 			getCurrentPage: () => BLOCK_PAGE,
+			acceptedKinds: ['stroke', 'shape', 'text'],
 			onAnnotationsChanged: () => this.scheduleWrite(),
 			// Backed denser while zoomed (see zoomedScale), and a pen is
 			// measured against the block as it is shown, not against how

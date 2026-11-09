@@ -124,6 +124,17 @@ export function openPenPicker(anchor: HTMLElement, controller: AnnotationControl
 		rows.push(row);
 	}
 
+	const close = hangPicker(picker, anchor, onClose);
+
+	const active = rows.find((row) => row.classList.contains('is-active')) ?? rows[0];
+	active?.querySelector<HTMLButtonElement>('.inkling-pen-option-choose')?.focus();
+	return close;
+}
+
+// Hangs a picker from the button that opened it, and closes it on a choice
+// elsewhere: a press outside, Escape, a scroll. Returns what closes it.
+export function hangPicker(picker: HTMLElement, anchor: HTMLElement, onClose: () => void): () => void {
+	const doc = anchor.ownerDocument;
 	// Below the button, its left edge under the button's, and pulled back
 	// inside the window when that would hang off the right — a pen at the
 	// end of a phone's strip.
@@ -167,8 +178,5 @@ export function openPenPicker(anchor: HTMLElement, controller: AnnotationControl
 	doc.addEventListener('keydown', onKeyDown, true);
 	win?.addEventListener('scroll', onScroll, true);
 	win?.addEventListener('resize', close);
-
-	const active = rows.find((row) => row.classList.contains('is-active')) ?? rows[0];
-	active?.querySelector<HTMLButtonElement>('.inkling-pen-option-choose')?.focus();
 	return close;
 }

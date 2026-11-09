@@ -45,6 +45,19 @@ export function readCorePdfPage(view: unknown): number | null {
 	return typeof page === 'number' && Number.isFinite(page) && page >= 1 ? page : null;
 }
 
+// When each file's readers were last rebuilt, for telling this device's own
+// page changes from another's (see readerPageWatch.ts).
+const refreshedAt = new Map<string, number>();
+const JUST_REFRESHED_MS = 6000;
+
+export function wasJustRefreshed(file: TFile): boolean {
+	return Date.now() - (refreshedAt.get(file.path) ?? 0) < JUST_REFRESHED_MS;
+}
+
+export function openInCoreReader(app: App, file: TFile): boolean {
+	return app.workspace.getLeavesOfType(CORE_PDF_VIEW).some((leaf) => leaf.view instanceof FileView && leaf.view.file?.path === file.path);
+}
+
 // Rebuilds every reader showing `file`, at the page each was on.
 //
 // Obsidian's reader does reload a PDF that changes, but only the document:
@@ -54,6 +67,7 @@ export function readCorePdfPage(view: unknown): number | null {
 // what Obsidian itself does when a view's settings change — makes all of it
 // new. Called after every change this plugin makes to a PDF's pages.
 export async function refreshCoreReaders(app: App, file: TFile): Promise<void> {
+	refreshedAt.set(file.path, Date.now());
 	for (const leaf of app.workspace.getLeavesOfType(CORE_PDF_VIEW)) {
 		const view = leaf.view;
 		if (!(view instanceof FileView) || view.file?.path !== file.path) continue;

@@ -1,4 +1,4 @@
-import { Annotation, NOTE_MARKER_SIZE, Point, Rect } from './types';
+import { Annotation, NOTE_MARKER_SIZE, Point, Rect, textBlockSize } from './types';
 
 export function distance(a: Point, b: Point): number {
 	return Math.hypot(a.x - b.x, a.y - b.y);
@@ -31,6 +31,10 @@ function distanceToPolyline(p: Point, points: Point[]): number {
 
 export function boundingBox(annotation: Annotation): Rect {
 	if (annotation.kind === 'note') return noteBox(annotation.at);
+	if (annotation.kind === 'text') {
+		const size = textBlockSize(annotation.text, annotation.width);
+		return { minX: annotation.at.x, minY: annotation.at.y, maxX: annotation.at.x + size.width, maxY: annotation.at.y + size.height };
+	}
 	const points = annotation.kind === 'stroke' ? annotation.points : [annotation.start, annotation.end];
 	const xs = points.map((p) => p.x);
 	const ys = points.map((p) => p.y);
@@ -159,12 +163,13 @@ export function scaleAnnotationAbout(annotation: Annotation, anchor: Point, fact
 	const project = (p: Point): Point => ({ ...p, x: anchor.x + (p.x - anchor.x) * factor, y: anchor.y + (p.y - anchor.y) * factor });
 	if (annotation.kind === 'note') return { ...annotation, at: project(annotation.at) };
 	const width = annotation.width * factor;
+	if (annotation.kind === 'text') return { ...annotation, width, at: project(annotation.at) };
 	if (annotation.kind === 'stroke') return { ...annotation, width, points: annotation.points.map(project) };
 	return { ...annotation, width, start: project(annotation.start), end: project(annotation.end) };
 }
 
 export function translateAnnotation(annotation: Annotation, dx: number, dy: number): Annotation {
-	if (annotation.kind === 'note') {
+	if (annotation.kind === 'note' || annotation.kind === 'text') {
 		return { ...annotation, at: { x: annotation.at.x + dx, y: annotation.at.y + dy } };
 	}
 	if (annotation.kind === 'stroke') {
@@ -197,6 +202,7 @@ export function scaleAnnotation(annotation: Annotation, from: Rect, to: Rect): A
 	// chrome at a fixed size, not geometry, so scaling it would make a
 	// pin the size of a paragraph.
 	if (annotation.kind === 'note') return { ...annotation, at: project(annotation.at) };
+	if (annotation.kind === 'text') return { ...annotation, width: annotation.width * scaleY, at: project(annotation.at) };
 	if (annotation.kind === 'stroke') {
 		return { ...annotation, points: annotation.points.map(project) };
 	}
@@ -215,7 +221,7 @@ export function scaleAnnotationUniform(annotation: Annotation, factor: number): 
 	const point = (p: Point): Point => (p.p === undefined ? { x: p.x * factor, y: p.y * factor } : { x: p.x * factor, y: p.y * factor, p: p.p });
 	const width = annotation.width * factor;
 
-	if (annotation.kind === 'note') return { ...annotation, width, at: point(annotation.at) };
+	if (annotation.kind === 'note' || annotation.kind === 'text') return { ...annotation, width, at: point(annotation.at) };
 	if (annotation.kind === 'stroke') return { ...annotation, width, points: annotation.points.map(point) };
 	return { ...annotation, width, start: point(annotation.start), end: point(annotation.end) };
 }

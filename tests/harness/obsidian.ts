@@ -140,6 +140,18 @@ export class Modal {
 	// and only built when something asks, so a test that never opens a
 	// dialog's contents needs no DOM at all.
 	private elements: { modalEl: HTMLElement; contentEl: HTMLElement } | null = null;
+	// Fields the real Modal sets on every instance (read from Obsidian 1.15).
+	// A subclass with a method of one of these names has it overwritten, and
+	// only a fake that has them too shows that.
+	shouldRestoreSelection = true;
+	selection: unknown = null;
+	win: unknown = null;
+	shouldAnimateOpen = true;
+	isOpen = false;
+	hasInitialInputFocus = true;
+	dimBackground = true;
+	bgOpacity = '0.85';
+	isAnimated = false;
 	constructor(public app: unknown) {}
 	get modalEl(): HTMLElement {
 		return this.dom().modalEl;

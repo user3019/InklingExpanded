@@ -1,22 +1,28 @@
-import { decodePDFRawStream, PDFArray, PDFDict, PDFDocument, PDFName, PDFNumber, PDFObject, PDFPage, PDFRawStream, PDFRef, PDFStream, PDFString } from 'pdf-lib';
+import { decodePDFRawStream, PDFArray, PDFDict, PDFDocument, PDFHexString, PDFName, PDFNumber, PDFObject, PDFPage, PDFRawStream, PDFRef, PDFStream, PDFString } from 'pdf-lib';
 import { boundingBox } from '../annotate/geometry';
 import { hasPressure, isOutlined, isSharp, SHARP_MITRE_LIMIT, strokeCentreline, strokeOutline } from '../annotate/stroke';
-import { BRUSH_KEY, ID_PREFIX, INKLING_EXTRAS, PRESSURE_KEY, QUOTE_KEY } from './annotationFormat';
+import { BRUSH_KEY, ID_PREFIX, INKLING_EXTRAS, PRESSURE_KEY, QUOTE_KEY, TEXT_KEY } from './annotationFormat';
 import type { TouchFn } from './changeSet';
 import { arrowHeadOps, ellipseOps, moveLineOps, noteMarkerOps, pathOps, rectangleOps } from './contentStream';
 import {
 	Annotation,
 	DEFAULT_COLOR,
 	DEFAULT_WIDTH,
+	dashPattern,
 	HIGHLIGHTER_OPACITY,
 	ImageAnnotation,
 	isPenBrush,
+	LineDash,
 	NOTE_MARKER_SIZE,
 	NoteAnnotation,
 	PicturePixels,
 	Point,
+	SHAPE_FILL_OPACITY,
 	ShapeAnnotation,
 	StrokeAnnotation,
+	TEXT_LINE_HEIGHT,
+	TextAnnotation,
+	textBlockSize,
 } from '../annotate/types';
 
 // Mirrors pdf-lib's own (unexported) PDFContext.obj()/stream() literal
@@ -122,8 +128,9 @@ function buildAppearanceStream(
 	content: string,
 	opacity = 1,
 	blend?: 'Multiply',
+	extraResources: PdfLiteralObject = {},
 ): PDFRef {
-	let resources: PdfLiteralObject = {};
+	let resources: PdfLiteralObject = extraResources;
 	let body = content;
 	if (opacity < 1 || blend) {
 		const state: PdfLiteralObject = { Type: 'ExtGState', ca: opacity, CA: opacity };
@@ -177,7 +184,9 @@ function withSharedFields(fields: PdfLiteralObject, annotation: Annotation): Pdf
 // the same thing here and only one of them should reach the rest of the
 // code.
 function readSharedFields(dict: PDFDict, annotation: Annotation): Annotation {
-	const note = dict.lookupMaybe(PDFName.of('Contents'), PDFString)?.decodeText().trim();
+	// For typed text, /Contents is the text itself (see readOne), not a note
+	// on it.
+	const note = annotation.kind === 'text' ? undefined : dict.lookupMaybe(PDFName.of('Contents'), PDFString)?.decodeText().trim();
 	if (note) annotation.note = note;
 
 	const quote = dict
@@ -347,12 +356,15 @@ function samePicture(a: PicturePixels, b: PicturePixels): boolean {
 function writeShape(pdfDoc: PDFDocument, page: PDFPage, shape: ShapeAnnotation): void {
 	const [r, g, b] = hexToRgb(shape.color);
 	const box = boundingBox(shape);
-	const header = strokeHeader(shape.color, shape.width);
+	const pattern = shape.dash ? dashPattern(shape.dash, shape.width) : null;
+	const header = [...strokeHeader(shape.color, shape.width), ...(pattern ? [`[${pattern.map((value) => value.toFixed(2)).join(' ')}] 0 d`] : [])];
+	const borderStyle: PdfLiteralObject = pattern ? { W: shape.width, S: 'D', D: pattern } : { W: shape.width };
 
 	let subtype: string;
 	let extra: PdfLiteralObject = {};
 	let bbox: number[];
 	let content: string;
+	let resources: PdfLiteralObject = {};
 
 	if (shape.tool === 'line' || shape.tool === 'arrow') {
 		subtype = 'Line';
@@ -361,8 +373,11 @@ function writeShape(pdfDoc: PDFDocument, page: PDFPage, shape: ShapeAnnotation):
 		bbox = [box.minX - pad, box.minY - pad, box.maxX + pad, box.maxY + pad];
 		const lines = [...header, moveLineOps([shape.start, shape.end]), 'S'];
 		if (shape.tool === 'arrow') {
-			extra.LE = ['None', 'OpenArrow'];
-			lines.push(arrowHeadOps(shape.start, shape.end, Math.max(12, shape.width * 3)), 'S');
+			const head = Math.max(12, shape.width * 3);
+			extra.LE = [shape.bothEnds ? 'OpenArrow' : 'None', 'OpenArrow'];
+			// Solid, whatever the shaft is.
+			lines.push('[] 0 d', arrowHeadOps(shape.start, shape.end, head), 'S');
+			if (shape.bothEnds) lines.push(arrowHeadOps(shape.end, shape.start, head), 'S');
 		}
 		content = lines.join('\n');
 	} else {
@@ -373,17 +388,23 @@ function writeShape(pdfDoc: PDFDocument, page: PDFPage, shape: ShapeAnnotation):
 		const pad = shape.width / 2;
 		bbox = [box.minX - pad, box.minY - pad, box.maxX + pad, box.maxY + pad];
 		subtype = shape.tool === 'rectangle' ? 'Square' : 'Circle';
-		content =
+		const outline =
 			shape.tool === 'rectangle'
-				? [...header, rectangleOps(box.minX, box.minY, box.maxX - box.minX, box.maxY - box.minY), 'S'].join('\n')
-				: [
-						...header,
-						ellipseOps((box.minX + box.maxX) / 2, (box.minY + box.maxY) / 2, (box.maxX - box.minX) / 2, (box.maxY - box.minY) / 2),
-						'S',
-					].join('\n');
+				? rectangleOps(box.minX, box.minY, box.maxX - box.minX, box.maxY - box.minY)
+				: ellipseOps((box.minX + box.maxX) / 2, (box.minY + box.maxY) / 2, (box.maxX - box.minX) / 2, (box.maxY - box.minY) / 2);
+		// The tint first and under its own opacity, so the line round it stays
+		// solid. /IC says the same for a reader that draws shapes for itself.
+		if (shape.filled) {
+			extra.IC = [r, g, b];
+			const tint = pdfDoc.context.register(pdfDoc.context.obj({ Type: 'ExtGState', ca: SHAPE_FILL_OPACITY }));
+			resources = { ExtGState: { GS0: tint } };
+			content = ['q', '/GS0 gs', ...fillHeader(shape.color), outline, 'f', 'Q', ...header, outline, 'S'].join('\n');
+		} else {
+			content = [...header, outline, 'S'].join('\n');
+		}
 	}
 
-	const apRef = buildAppearanceStream(pdfDoc, bbox, content);
+	const apRef = buildAppearanceStream(pdfDoc, bbox, content, 1, undefined, resources);
 
 	tagAndAdd(
 		pdfDoc,
@@ -395,7 +416,7 @@ function writeShape(pdfDoc: PDFDocument, page: PDFPage, shape: ShapeAnnotation):
 				Subtype: subtype,
 				Rect: bbox,
 				C: [r, g, b],
-				BS: { W: shape.width },
+				BS: borderStyle,
 				F: 4,
 				AP: { N: apRef },
 				...extra,
@@ -411,6 +432,83 @@ function writeShape(pdfDoc: PDFDocument, page: PDFPage, shape: ShapeAnnotation):
 // house icon — a yellow speech bubble in one reader, a pushpin in another —
 // and the colour that says which category this note belongs to would be
 // lost with it.
+// WinAnsi, which is what the appearance's Helvetica is encoded in. Latin
+// text, umlauts and the euro included; anything further from it shows as a
+// question mark in other readers' copy of the page, and stays exactly itself
+// in /Contents and in this plugin.
+const WIN_ANSI_EXTRAS = new Map<number, number>(
+	[0x20ac, 0, 0x201a, 0x192, 0x201e, 0x2026, 0x2020, 0x2021, 0x2c6, 0x2030, 0x160, 0x2039, 0x152, 0, 0x17d, 0, 0, 0x2018, 0x2019, 0x201c, 0x201d, 0x2022, 0x2013, 0x2014, 0x2dc, 0x2122, 0x161, 0x203a, 0x153, 0, 0x17e, 0x178]
+		.map((unicode, index): [number, number] => [unicode, 0x80 + index])
+		.filter(([unicode]) => unicode !== 0),
+);
+
+function winAnsiHex(line: string): string {
+	let hex = '';
+	for (const char of line) {
+		const code = char.codePointAt(0) ?? 0x3f;
+		const byte = WIN_ANSI_EXTRAS.get(code) ?? ((code >= 0x20 && code <= 0x7e) || (code >= 0xa0 && code <= 0xff) ? code : 0x3f);
+		hex += byte.toString(16).padStart(2, '0');
+	}
+	return hex;
+}
+
+// On a turned page text runs the way the page is shown, not the way it is
+// stored: which way "along the line" and "down the lines" are in the page's
+// own space, for each quarter turn. See backgroundOperators in templates.ts
+// for the same mapping.
+function textAxes(rotation: number): { right: Point; down: Point } {
+	switch (((rotation % 360) + 360) % 360) {
+		case 90:
+			return { right: { x: 0, y: 1 }, down: { x: 1, y: 0 } };
+		case 180:
+			return { right: { x: -1, y: 0 }, down: { x: 0, y: 1 } };
+		case 270:
+			return { right: { x: 0, y: -1 }, down: { x: -1, y: 0 } };
+		default:
+			return { right: { x: 1, y: 0 }, down: { x: 0, y: -1 } };
+	}
+}
+
+function writeText(pdfDoc: PDFDocument, page: PDFPage, text: TextAnnotation): void {
+	const [r, g, b] = hexToRgb(text.color);
+	const size = text.width;
+	const { right, down } = textAxes(page.getRotation().angle);
+	const block = textBlockSize(text.text, size);
+	const corners = [0, block.width].flatMap((along) =>
+		[0, block.height].map((across) => ({
+			x: text.at.x + right.x * along + down.x * across,
+			y: text.at.y + right.y * along + down.y * across,
+		})),
+	);
+	const xs = corners.map((corner) => corner.x);
+	const ys = corners.map((corner) => corner.y);
+	const bbox = [Math.min(...xs), Math.min(...ys), Math.max(...xs), Math.max(...ys)];
+
+	const lines = text.text.split('\n').map((line, index) => {
+		// A baseline sits about four fifths of the way down its line.
+		const drop = (index + 0.8) * size * TEXT_LINE_HEIGHT;
+		const x = text.at.x + down.x * drop;
+		const y = text.at.y + down.y * drop;
+		return `${[right.x, right.y, -down.x, -down.y, x, y].map((value) => value.toFixed(2)).join(' ')} Tm <${winAnsiHex(line)}> Tj`;
+	});
+	const content = ['BT', `/Helv ${size.toFixed(2)} Tf`, `${r.toFixed(3)} ${g.toFixed(3)} ${b.toFixed(3)} rg`, ...lines, 'ET'].join('\n');
+	const apRef = buildAppearanceStream(pdfDoc, bbox, content, 1, undefined, {
+		Font: { Helv: { Type: 'Font', Subtype: 'Type1', BaseFont: 'Helvetica', Encoding: 'WinAnsiEncoding' } },
+	});
+
+	tagAndAdd(pdfDoc, page, text.id, {
+		Type: 'Annot',
+		Subtype: 'FreeText',
+		Rect: bbox,
+		// UTF-16, unlike the appearance: this is the text itself.
+		Contents: PDFHexString.fromText(text.text),
+		DA: PDFString.of(`${r.toFixed(3)} ${g.toFixed(3)} ${b.toFixed(3)} rg /Helv ${size.toFixed(2)} Tf`),
+		F: 4,
+		AP: { N: apRef },
+		[INKLING_EXTRAS]: { [TEXT_KEY]: [text.at.x, text.at.y, size, r, g, b] },
+	});
+}
+
 function writeNote(pdfDoc: PDFDocument, page: PDFPage, note: NoteAnnotation): void {
 	const [r, g, b] = hexToRgb(note.color);
 	const half = NOTE_MARKER_SIZE / 2;
@@ -559,6 +657,10 @@ function sameAsWritten(existing: Annotation, incoming: Annotation): boolean {
 	}
 	if (!near(existing.width, incoming.width)) return false;
 
+	if (existing.kind === 'text' && incoming.kind === 'text') {
+		return existing.text === incoming.text && nearPoint(existing.at, incoming.at);
+	}
+
 	if (existing.kind === 'stroke' && incoming.kind === 'stroke') {
 		if (existing.tool !== incoming.tool || existing.points.length !== incoming.points.length) return false;
 		if ((existing.brush ?? 'pen') !== (incoming.brush ?? 'pen')) return false;
@@ -580,7 +682,8 @@ function sameAsWritten(existing: Annotation, incoming: Annotation): boolean {
 	}
 
 	if (existing.kind === 'shape' && incoming.kind === 'shape') {
-		if (existing.tool !== incoming.tool) return false;
+		if (existing.tool !== incoming.tool || existing.dash !== incoming.dash) return false;
+		if ((existing.filled === true) !== (incoming.filled === true) || (existing.bothEnds === true) !== (incoming.bothEnds === true)) return false;
 		if (incoming.tool === 'line' || incoming.tool === 'arrow') {
 			return nearPoint(existing.start, incoming.start) && nearPoint(existing.end, incoming.end);
 		}
@@ -715,6 +818,7 @@ export function writeInklingAnnotations(
 		if (item instanceof PDFRef) page.node.addAnnot(item);
 		else if (item.kind === 'stroke') writeStroke(pdfDoc, page, item);
 		else if (item.kind === 'note') writeNote(pdfDoc, page, item);
+		else if (item.kind === 'text') writeText(pdfDoc, page, item);
 		else if (item.kind === 'image') writeImage(pdfDoc, page, item, reusedPictures.get(item.id) ?? null);
 		else writeShape(pdfDoc, page, item);
 	}
@@ -789,6 +893,17 @@ function readWidth(dict: PDFDict): number {
 	return dict.lookupMaybe(PDFName.of('BS'), PDFDict)?.lookupMaybe(PDFName.of('W'), PDFNumber)?.asNumber() ?? DEFAULT_WIDTH;
 }
 
+// A dashed or dotted line, from its border style: a dot is a dash of next
+// to no length.
+function readDash(dict: PDFDict, width: number): { dash?: LineDash } {
+	const style = dict.lookupMaybe(PDFName.of('BS'), PDFDict);
+	if (style?.lookupMaybe(PDFName.of('S'), PDFName)?.decodeText() !== 'D') return {};
+	const pattern = style.lookupMaybe(PDFName.of('D'), PDFArray);
+	const [on] = pattern ? numbersFromArray(pattern) : [];
+	if (on === undefined) return {};
+	return { dash: on < width * 0.5 ? 'dotted' : 'dashed' };
+}
+
 function readOne(id: string, dict: PDFDict): Annotation | null {
 	const subtype = dict.lookupMaybe(PDFName.of('Subtype'), PDFName)?.decodeText();
 	const color = readColor(dict);
@@ -837,12 +952,22 @@ function readOne(id: string, dict: PDFDict): Annotation | null {
 		return { id, kind: 'stroke', tool, color, width, points, ...(brush ? { brush } : {}) };
 	}
 
+	if (subtype === 'FreeText') {
+		const stored = dict.lookupMaybe(PDFName.of(INKLING_EXTRAS), PDFDict)?.lookupMaybe(PDFName.of(TEXT_KEY), PDFArray);
+		const [x, y, size, r, g, b] = stored ? numbersFromArray(stored) : [];
+		const contents = dict.lookupMaybe(PDFName.of('Contents'), PDFString, PDFHexString)?.decodeText();
+		if (x === undefined || y === undefined || size === undefined || r === undefined || g === undefined || b === undefined || !contents) return null;
+		return { id, kind: 'text', color: rgbToHex(r, g, b), width: size, at: { x, y }, text: contents };
+	}
+
 	if (subtype === 'Line') {
 		const nums = dict.lookupMaybe(PDFName.of('L'), PDFArray);
 		const [x1, y1, x2, y2] = nums ? numbersFromArray(nums) : [];
 		if (x1 === undefined || y1 === undefined || x2 === undefined || y2 === undefined) return null;
 
-		const endStyle = dict.lookupMaybe(PDFName.of('LE'), PDFArray)?.lookupMaybe(1, PDFName)?.decodeText();
+		const ends = dict.lookupMaybe(PDFName.of('LE'), PDFArray);
+		const endStyle = ends?.lookupMaybe(1, PDFName)?.decodeText();
+		const startStyle = ends?.lookupMaybe(0, PDFName)?.decodeText();
 		return {
 			id,
 			kind: 'shape',
@@ -851,6 +976,8 @@ function readOne(id: string, dict: PDFDict): Annotation | null {
 			width,
 			start: { x: x1, y: y1 },
 			end: { x: x2, y: y2 },
+			...readDash(dict, width),
+			...(endStyle === 'OpenArrow' && startStyle === 'OpenArrow' ? { bothEnds: true } : {}),
 		};
 	}
 
@@ -888,6 +1015,8 @@ function readOne(id: string, dict: PDFDict): Annotation | null {
 			width,
 			start: { x: rx0 + half, y: ry0 + half },
 			end: { x: rx1 - half, y: ry1 - half },
+			...readDash(dict, width),
+			...(dict.has(PDFName.of('IC')) ? { filled: true } : {}),
 		};
 	}
 

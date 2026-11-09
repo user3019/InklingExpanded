@@ -26,7 +26,7 @@ describe('flattenOutline', () => {
 			{ title: 'Part two', dest: 90 },
 		];
 
-		expect(await flattenOutline(outline, resolveDest)).toEqual([
+		expect(await flattenOutline(outline, resolveDest)).toMatchObject([
 			{ title: 'Part one', pageNumber: 1, depth: 0 },
 			{ title: 'Chapter 1', pageNumber: 2, depth: 1 },
 			{ title: 'Chapter 2', pageNumber: 40, depth: 1 },
@@ -41,12 +41,12 @@ describe('flattenOutline', () => {
 		const outline: RawOutlineItem[] = [
 			{ title: 'Broken', dest: 'nowhere', items: [{ title: 'Fine', dest: 12 }] },
 		];
-		expect(await flattenOutline(outline, resolveDest)).toEqual([{ title: 'Fine', pageNumber: 12, depth: 1 }]);
+		expect(await flattenOutline(outline, resolveDest)).toMatchObject([{ title: 'Fine', pageNumber: 12, depth: 1 }]);
 	});
 
 	it('drops an untitled entry', async () => {
 		const outline: RawOutlineItem[] = [{ dest: 3 }, { title: '   ', dest: 4 }, { title: 'Real', dest: 5 }];
-		expect(await flattenOutline(outline, resolveDest)).toEqual([{ title: 'Real', pageNumber: 5, depth: 0 }]);
+		expect(await flattenOutline(outline, resolveDest)).toMatchObject([{ title: 'Real', pageNumber: 5, depth: 0 }]);
 	});
 
 	it('survives a resolver that throws, without losing the rest of the tree', async () => {
@@ -59,7 +59,7 @@ describe('flattenOutline', () => {
 			{ title: 'Explodes', dest: 'bad' },
 			{ title: 'Last', dest: 9 },
 		];
-		expect(await flattenOutline(outline, resolve)).toEqual([
+		expect(await flattenOutline(outline, resolve)).toMatchObject([
 			{ title: 'First', pageNumber: 1, depth: 0 },
 			{ title: 'Last', pageNumber: 9, depth: 0 },
 		]);

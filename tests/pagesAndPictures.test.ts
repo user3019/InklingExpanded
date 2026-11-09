@@ -76,7 +76,7 @@ describe('the thumbnail menu in Obsidian’s reader', () => {
 	it('offers to copy a link to the page, and to delete it, in place of Obsidian’s own', () => {
 		const { thumbnail, obsidiansOwn } = reader();
 		thumbnail.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true }));
-		expect(shownMenus[0]?.map((item) => item.title)).toEqual(['Copy link to page', 'Delete page']);
+		expect(shownMenus[0]?.map((item) => item.title)).toEqual(['Copy link to page', 'Manage pages…', 'Delete page']);
 		expect(obsidiansOwn).not.toHaveBeenCalled();
 	});
 

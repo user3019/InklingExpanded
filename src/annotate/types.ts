@@ -26,7 +26,7 @@ export function isPenBrush(value: unknown): value is PenBrush {
 	return typeof value === 'string' && (PEN_BRUSHES as readonly string[]).includes(value);
 }
 export type ShapeToolType = 'line' | 'rectangle' | 'oval' | 'arrow';
-export type ToolType = 'select' | DrawToolType | 'eraser' | 'note' | ShapeToolType;
+export type ToolType = 'select' | DrawToolType | 'eraser' | 'note' | 'text' | ShapeToolType;
 
 interface BaseAnnotation {
 	id: string;
@@ -65,11 +65,28 @@ export interface NoteAnnotation extends BaseAnnotation {
 	note: string;
 }
 
+// How a shape's line is drawn. Absent is solid.
+export type LineDash = 'dashed' | 'dotted';
+
 export interface ShapeAnnotation extends BaseAnnotation {
 	kind: 'shape';
 	tool: ShapeToolType;
 	start: Point;
 	end: Point;
+	dash?: LineDash;
+	// A rectangle or oval with its inside tinted (see SHAPE_FILL_OPACITY).
+	filled?: boolean;
+	// An arrow with a head at both ends.
+	bothEnds?: boolean;
+}
+
+// Typed text on the page. `at` is its top-left corner, and `width` — which
+// every other kind uses for line thickness — is its font size, so that
+// scaling, saving and pasting all treat it the way they treat a stroke.
+export interface TextAnnotation extends BaseAnnotation {
+	kind: 'text';
+	at: Point;
+	text: string;
 }
 
 // A picture's pixels, as a page holds them. JPEG bytes for a picture with
@@ -103,7 +120,33 @@ export function isLockedPicture(annotation: Annotation): boolean {
 	return annotation.kind === 'image' && annotation.locked === true;
 }
 
-export type Annotation = StrokeAnnotation | ShapeAnnotation | NoteAnnotation | ImageAnnotation;
+export type Annotation = StrokeAnnotation | ShapeAnnotation | NoteAnnotation | ImageAnnotation | TextAnnotation;
+
+// How much of a filled shape's colour shows: enough to mark the area,
+// little enough to read what is under it.
+export const SHAPE_FILL_OPACITY = 0.25;
+
+// A dashed or dotted line's on and off lengths, for a line of this width.
+// A dot is a dash of next to no length, which a round cap makes round.
+export function dashPattern(dash: LineDash, width: number): [number, number] {
+	return dash === 'dashed' ? [width * 3, width * 3] : [0.01, width * 2.2];
+}
+
+// The font typed text is drawn in. Helvetica is one of the fonts every PDF
+// reader has without its being embedded, so the page looks the same in the
+// file as it does here.
+export const TEXT_FONT_FAMILY = 'Helvetica, Arial, sans-serif';
+export const TEXT_LINE_HEIGHT = 1.25;
+// Text's width is estimated rather than measured: its box is needed where
+// there is no canvas to measure on — saving, in the writer's worker — and
+// the two must agree. Generous, so a box always holds what is in it.
+const TEXT_ADVANCE = 0.6;
+
+export function textBlockSize(text: string, fontSize: number): { width: number; height: number } {
+	const lines = text.split('\n');
+	const longest = Math.max(1, ...lines.map((line) => line.length));
+	return { width: longest * fontSize * TEXT_ADVANCE, height: lines.length * fontSize * TEXT_LINE_HEIGHT };
+}
 
 // The marker a note annotation draws, in the surface’s own coordinate
 // space. Fixed rather than derived from stroke width: a note has no
@@ -205,6 +248,8 @@ export function paletteFor(tool: ToolType): readonly PresetColor[] {
 }
 
 export const DEFAULT_WIDTH = 3;
+// Typed text's starting size, in points.
+export const DEFAULT_TEXT_SIZE = 14;
 
 // A highlighter's default, in the same units. Freehand highlighting with a
 // 3px nib is just a pale pen — a highlighter has to be about as tall as a
@@ -243,6 +288,7 @@ export function defaultStyleFor(tool: ToolType, brush: PenBrush = 'pen'): { colo
 		return { color: HIGHLIGHTER_COLORS[0]?.value ?? DEFAULT_COLOR, width: DEFAULT_HIGHLIGHTER_WIDTH };
 	}
 	if (tool === 'pen') return { color: DEFAULT_COLOR, width: DEFAULT_BRUSH_WIDTHS[brush] };
+	if (tool === 'text') return { color: DEFAULT_COLOR, width: DEFAULT_TEXT_SIZE };
 	return { color: DEFAULT_COLOR, width: DEFAULT_WIDTH };
 }
 

@@ -976,28 +976,35 @@
 	--icon-size: var(--icon-m, 18px);
 }
 
-.inkling-pdf-spinner {
-	width: 28px;
-	height: 28px;
-	border: 2px solid var(--background-modifier-border);
-	border-top-color: var(--interactive-accent);
-	border-radius: 50%;
-	animation: inkling-spin 700ms linear infinite;
+/* A picture of the pages as they were, over the view while it reloads (see
+   "Reloading without being seen to" in src/pdfView.ts). Nothing on it can be
+   touched: the pen goes straight through to the new pages under it. */
+.inkling-pdf-leaf {
+	position: relative;
 }
 
-@keyframes inkling-spin {
-	to {
-		transform: rotate(360deg);
-	}
+.inkling-reload-cover {
+	position: absolute;
+	left: var(--inkling-cover-left);
+	top: var(--inkling-cover-top);
+	width: var(--inkling-cover-width);
+	height: var(--inkling-cover-height);
+	background: var(--inkling-cover-background);
+	overflow: hidden;
+	pointer-events: none;
+	z-index: 5;
 }
 
-/* A spinner is exactly the kind of continuous motion this setting exists to
-   stop. The ring stays — as a static one it still marks the spot as "busy"
-   rather than the area simply being empty. */
-@media (prefers-reduced-motion: reduce) {
-	.inkling-pdf-spinner {
-		animation: none;
-	}
+.inkling-reload-sheet {
+	position: absolute;
+	left: var(--inkling-sheet-left);
+	top: var(--inkling-sheet-top);
+	width: var(--inkling-sheet-width);
+	height: var(--inkling-sheet-height);
+}
+
+.inkling-reload-cover.is-inverted .inkling-reload-sheet {
+	filter: invert(1) hue-rotate(180deg);
 }
 
 /* ---------------------------------------------------------------------
@@ -1694,4 +1701,243 @@
    any tie on source order — which is why it must stay last. */
 [class*='inkling-'][hidden] {
 	display: none;
+}
+
+/* ---------------------------------------------------------------------
+   Moving pages (src/reorderPagesModal.ts, src/pageMenu.ts)
+   --------------------------------------------------------------------- */
+
+.inkling-reorder-row {
+	min-height: 76px;
+}
+
+.inkling-reorder-row.is-focus .inkling-layout-label {
+	font-weight: var(--font-semibold);
+}
+
+/* Fixed in size whatever the page's shape, so that every row is the same
+   height and a dragged one can be followed by simple arithmetic. */
+.inkling-reorder-thumb {
+	flex: none;
+	width: 52px;
+	height: 68px;
+	object-fit: contain;
+	border-radius: var(--radius-s);
+	background: var(--background-primary);
+}
+
+.inkling-layout-modal button.inkling-layout-handle:has(> .inkling-layout-grip:only-child) {
+	min-width: 44px;
+	justify-content: center;
+}
+
+/* Where a page dragged in the reader's sidebar will land. */
+.inkling-page-drop-line {
+	position: fixed;
+	left: var(--inkling-drop-left);
+	top: var(--inkling-drop-top);
+	width: var(--inkling-drop-width);
+	height: 3px;
+	margin-top: -1px;
+	border-radius: 2px;
+	background: var(--interactive-accent);
+	pointer-events: none;
+	z-index: var(--layer-popover);
+}
+
+.thumbnail.inkling-page-moving {
+	opacity: 0.4;
+}
+
+/* The box text is typed in, right where it will be (see "Typing on the page"
+   in src/annotate/controller.ts). */
+.inkling-text-editor,
+.inkling-text-editor:focus {
+	position: absolute;
+	left: var(--inkling-text-left);
+	top: var(--inkling-text-top);
+	width: var(--inkling-text-width, 40px);
+	height: var(--inkling-text-height, auto);
+	min-width: 40px;
+	padding: 0;
+	margin: 0;
+	z-index: 4;
+	border: none;
+	border-radius: 0;
+	outline: 1px dashed var(--interactive-accent);
+	box-shadow: none;
+	background: transparent;
+	color: var(--inkling-text-color);
+	font-family: Helvetica, Arial, sans-serif;
+	font-size: var(--inkling-text-size);
+	line-height: 1.25;
+	overflow: hidden;
+	resize: none;
+	white-space: pre;
+}
+
+.inkling-shape-picker {
+	min-width: 180px;
+}
+
+.inkling-shape-styles {
+	display: flex;
+	gap: var(--size-4-1);
+}
+
+.inkling-pen-picker button.inkling-shape-style {
+	flex: 1 1 0;
+	height: 36px;
+	padding: 0 var(--size-4-2);
+	background: none;
+	box-shadow: none;
+	border-radius: var(--radius-s);
+}
+
+.inkling-pen-picker button.inkling-shape-style.is-active {
+	background-color: var(--background-modifier-active-hover);
+}
+
+.inkling-shape-style-line {
+	display: block;
+	width: 100%;
+	border-top: 2px solid var(--text-normal);
+}
+
+.inkling-shape-style-line.is-dashed {
+	border-top-style: dashed;
+}
+
+.inkling-shape-style-line.is-dotted {
+	border-top-style: dotted;
+}
+
+/* ---- Managing pages ---- */
+
+.inkling-pages-bar {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: var(--size-4-1);
+	margin-bottom: var(--size-4-2);
+}
+
+.inkling-pages-spacer {
+	flex: 1 1 0;
+}
+
+.inkling-pages-count {
+	color: var(--text-muted);
+	font-size: var(--font-ui-smaller);
+}
+
+.inkling-pages-bar button.inkling-pages-action {
+	min-width: 36px;
+	padding: 0 var(--size-4-2);
+}
+
+.inkling-pages-bar button:disabled {
+	opacity: 0.4;
+}
+
+.is-mobile .inkling-pages-bar button {
+	min-height: 40px;
+}
+
+.is-mobile .inkling-pages-bar button.inkling-pages-action {
+	min-width: 44px;
+}
+
+.inkling-reorder-row {
+	cursor: pointer;
+}
+
+.inkling-reorder-row.is-selected {
+	background-color: var(--background-modifier-active-hover);
+}
+
+.inkling-reorder-check {
+	flex: none;
+}
+
+/* Square, so a page turned on its side still fits without moving the row. */
+.inkling-reorder-frame {
+	flex: none;
+	display: grid;
+	place-items: center;
+	width: 68px;
+	height: 68px;
+}
+
+.inkling-reorder-frame .inkling-reorder-thumb {
+	transform: rotate(var(--inkling-page-turn, 0deg));
+	transition: transform 120ms ease-out;
+}
+
+/* Going along with the row under the finger. */
+.inkling-reorder-row.is-carried {
+	opacity: 0.45;
+}
+
+.inkling-reorder-row[data-carrying]::after {
+	content: attr(data-carrying);
+	position: absolute;
+	top: 4px;
+	right: 8px;
+	min-width: 20px;
+	padding: 0 6px;
+	border-radius: 10px;
+	background: var(--interactive-accent);
+	color: var(--text-on-accent);
+	font-size: var(--font-ui-smaller);
+	text-align: center;
+}
+
+/* ---- Bookmarks ---- */
+
+.inkling-nav-outline-heading {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+}
+
+.inkling-nav-line {
+	display: flex;
+	align-items: center;
+	min-width: 0;
+}
+
+.inkling-nav-line .inkling-nav-entry {
+	flex: 1 1 auto;
+	min-width: 0;
+}
+
+.inkling-nav-entry-actions {
+	display: none;
+	flex: none;
+}
+
+/* Revealed where there is a hover to reveal them, and always on touch. */
+.inkling-nav-line:hover .inkling-nav-entry-actions,
+.inkling-nav-line:focus-within .inkling-nav-entry-actions,
+.is-mobile .inkling-nav-entry-actions {
+	display: flex;
+}
+
+.inkling-nav-panel button.inkling-nav-bookmark-action {
+	width: 28px;
+	height: 28px;
+	padding: 0;
+	box-shadow: none;
+	background: transparent;
+	color: var(--text-muted);
+}
+
+.is-mobile .inkling-nav-panel button.inkling-nav-bookmark-action {
+	width: 36px;
+	height: 36px;
+}
+
+.inkling-bookmark-name {
+	width: 100%;
 }

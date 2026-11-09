@@ -161,6 +161,14 @@ function readAnnotation(value: unknown): Annotation | null {
 	if (typeof id !== 'string' || !id) return null;
 	if (typeof color !== 'string' || !color) return null;
 	if (!isFiniteNumber(width) || width <= 0) return null;
+
+	// Text has no tool to name.
+	if (kind === 'text') {
+		const at = readFlexiblePoint(raw.at);
+		if (!at || typeof raw.text !== 'string' || !raw.text) return null;
+		return { id, color, width, kind: 'text', at, text: raw.text };
+	}
+
 	if (typeof tool !== 'string') return null;
 
 	if (kind === 'stroke') {
@@ -195,7 +203,19 @@ function readAnnotation(value: unknown): Annotation | null {
 		const start = readFlexiblePoint(raw.start);
 		const end = readFlexiblePoint(raw.end);
 		if (!start || !end) return null;
-		return { id, color, width, kind: 'shape', tool: tool as ShapeToolType, start, end };
+		return {
+			id,
+			color,
+			width,
+			kind: 'shape',
+			tool: tool as ShapeToolType,
+			start,
+			end,
+			// Each only as what it can be; anything else draws as a plain line.
+			...(raw.dash === 'dashed' || raw.dash === 'dotted' ? { dash: raw.dash } : {}),
+			...(raw.filled === true ? { filled: true } : {}),
+			...(raw.bothEnds === true ? { bothEnds: true } : {}),
+		};
 	}
 
 	return null;

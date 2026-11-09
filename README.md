@@ -38,6 +38,11 @@ plugin makes no network connections.
 - **Two pens.** Tap the pen in hand to choose between a **round pen** (smooth,
   round ends) and a **sharp pen** (follows your hand exactly, corners and all).
   Each has its own pressure switch and remembers its own colour and width.
+- **Type on the page.** The text tool (`t`) puts a box where you tap; a tap
+  anywhere else finishes it. Size and colour follow the toolbar.
+- **More line styles.** Press a shape tool in hand again to choose solid,
+  dashed or dotted, a filled shape, or an arrow with a head at both ends. They
+  are real PDF annotations, so other readers show them too.
 - **Draw with a finger.** A toolbar switch for phones and for styluses that
   report themselves as a finger; two fingers still zoom and pan.
 
@@ -52,8 +57,22 @@ plugin makes no network connections.
   shown.
 - **Add pages to any PDF** — not only notes made by the plugin. In a book or a
   handout the new page is blank and the size of the page you are on.
-- **Delete pages** from the page thumbnails in Obsidian's own PDF reader (long
-  press on a tablet, right-click on a desktop).
+- **Manage pages.** The toolbar's **Manage pages**, or long-press / right-click a
+  thumbnail in Obsidian's own PDF reader, opens a list of every page. Select any
+  number and move them together, turn, duplicate, delete or export them; nothing
+  changes until you press Save. With a mouse you can also drag a thumbnail
+  straight in the reader. Ink, links and bookmarks stay with their pages, and
+  another device with the PDF open follows when the sync arrives.
+- **Export pages.** From the same list: selected pages as a new PDF, or as PNG
+  pictures, next to the original and with your ink on them.
+- **Links follow their pages.** `[[Book.pdf#page=12]]` and Markdown links in your
+  notes are updated when pages move, are added or are deleted, including a
+  "page 12" in the link's text. A link to a deleted page is left as it was, and
+  you are told.
+- **Bookmarks.** Add, nest, rename and remove them in the outline panel. They
+  are the PDF's own table of contents, so every other reader shows them.
+- **Delete pages** from the same thumbnails (long press on a tablet, right-click
+  on a desktop).
 - **Page counts and thumbnails update** in Obsidian's reader as soon as pages
   are added, inserted or deleted.
 
@@ -163,6 +182,12 @@ https://github.com/user-attachments/assets/40446953-9efd-4fca-be6c-e2305961d351
 | Switch pens | Tap the pen while it is already in hand. |
 | Create an infinite canvas | "Create handwritten note" → paper: **Infinite canvas**. |
 | Change a page's background | Toolbar → **Page background** → this page or all pages. |
+| Arrange pages | Toolbar → **Manage pages**, or long-press / right-click a thumbnail → **Manage pages…**. Tap pages to select them, drag by the handle, then **Save**. |
+| Turn, duplicate or delete pages | **Manage pages** → select them → the buttons above the list. |
+| Export pages | **Manage pages** → select them → **Export** → new PDF or PNG. |
+| Add a bookmark | Outline panel → **+** next to "Outline" bookmarks the page you are on. |
+| Type on a page | Text tool (`t`) → tap → type → tap elsewhere. |
+| Dashed lines, filled shapes, double arrows | Press the shape tool in hand again. |
 | Delete a page | In Obsidian's reader, long-press or right-click its thumbnail → **Delete page**. |
 | Import a PDF or picture | Toolbar → **Import**. |
 | Pick a picture up again | Long-press it with the pen or a finger. |
@@ -179,6 +204,7 @@ Inside the annotate view:
 |---|---|
 | `s` `p` `h` `e` | Select, pen, highlighter, eraser |
 | `l` `r` `o` `a` | Line, rectangle, oval, arrow |
+| `t` | Text |
 | `1`–`6` | Preset colours |
 | `[` `]` | Thinner, thicker |
 | `Delete` | Delete selection |
@@ -238,6 +264,15 @@ with its annotations but drawing is off, with a banner saying why.
 changed — a kilobyte or two — so sync uploads the change rather than the book.
 A file that cannot safely be appended to is rewritten whole, and saved less
 often the larger it is. Every save is verified before a byte is written.
+
+**Text in other readers.** Typed text shows exactly in Obsidian everywhere; other
+PDF readers draw it in Helvetica, which covers Western alphabets only.
+
+**Exporting a PDF with a form or a signature** as a new PDF is refused, as
+rewriting one is. Exporting its pages as PNG works.
+
+**Links are followed in Markdown notes** on the device that made the change,
+and restoring an earlier version of a PDF does not change them back.
 
 **An infinite canvas stops growing at 200 inches a side**, the largest page
 other PDF readers open.

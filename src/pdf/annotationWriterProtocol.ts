@@ -59,6 +59,8 @@ interface OpenedOk {
 	incremental: boolean;
 	// See pageIdsOf in annotationWriterCore.ts.
 	pageIds: string[];
+	// See layoutStampOf in outline.ts.
+	layoutStamp: string;
 }
 
 // Discriminated, because the two outcomes go to different Vault calls and

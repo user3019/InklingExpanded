@@ -1,6 +1,20 @@
 import { boundingBox, unionBoundingBox } from './geometry';
 import { isOutlined, isSharp, SHARP_MITRE_LIMIT, smoothedPath, strokeCentreline, strokeOutline, type PathSegment } from './stroke';
-import { Annotation, ImageAnnotation, isLockedPicture, NOTE_MARKER_SIZE, PicturePixels, Point, Rect, StrokeAnnotation } from './types';
+import {
+	Annotation,
+	dashPattern,
+	ImageAnnotation,
+	isLockedPicture,
+	NOTE_MARKER_SIZE,
+	PicturePixels,
+	Point,
+	Rect,
+	SHAPE_FILL_OPACITY,
+	StrokeAnnotation,
+	TEXT_FONT_FAMILY,
+	TEXT_LINE_HEIGHT,
+	TextAnnotation,
+} from './types';
 
 const SELECTION_COLOR = '#1971c2';
 
@@ -268,6 +282,12 @@ function drawAnnotation(ctx: CanvasRenderingContext2D, annotation: Annotation, c
 		return;
 	}
 
+	if (annotation.kind === 'text') {
+		drawText(ctx, annotation);
+		ctx.restore();
+		return;
+	}
+
 	if (annotation.kind === 'stroke') {
 		// Anything not tapered draws as the smoothed path, which is what
 		// stops fast handwriting coming out visibly faceted.
@@ -280,15 +300,30 @@ function drawAnnotation(ctx: CanvasRenderingContext2D, annotation: Annotation, c
 		}
 	} else {
 		const { start, end } = annotation;
+		if (annotation.dash) ctx.setLineDash(dashPattern(annotation.dash, annotation.width));
+		const tinted = (paint: () => void) => {
+			if (!annotation.filled) return;
+			ctx.save();
+			ctx.globalAlpha = SHAPE_FILL_OPACITY;
+			ctx.fillStyle = annotation.color;
+			paint();
+			ctx.restore();
+		};
 		switch (annotation.tool) {
 			case 'line':
 				drawPolyline(ctx, [start, end]);
 				break;
-			case 'arrow':
+			case 'arrow': {
 				drawPolyline(ctx, [start, end]);
-				drawArrowhead(ctx, start, end, Math.max(12, annotation.width * 3));
+				const head = Math.max(12, annotation.width * 3);
+				// Always solid: a dotted arrowhead is not an arrowhead.
+				ctx.setLineDash([]);
+				drawArrowhead(ctx, start, end, head);
+				if (annotation.bothEnds) drawArrowhead(ctx, end, start, head);
 				break;
+			}
 			case 'rectangle':
+				tinted(() => ctx.fillRect(start.x, start.y, end.x - start.x, end.y - start.y));
 				ctx.strokeRect(start.x, start.y, end.x - start.x, end.y - start.y);
 				break;
 			case 'oval': {
@@ -296,12 +331,23 @@ function drawAnnotation(ctx: CanvasRenderingContext2D, annotation: Annotation, c
 				const ry = Math.abs(end.y - start.y) / 2;
 				ctx.beginPath();
 				ctx.ellipse((start.x + end.x) / 2, (start.y + end.y) / 2, rx, ry, 0, 0, Math.PI * 2);
+				tinted(() => ctx.fill());
 				ctx.stroke();
 				break;
 			}
 		}
 	}
 	ctx.restore();
+}
+
+function drawText(ctx: CanvasRenderingContext2D, annotation: TextAnnotation): void {
+	const size = annotation.width;
+	ctx.font = `${size}px ${TEXT_FONT_FAMILY}`;
+	ctx.fillStyle = annotation.color;
+	ctx.textBaseline = 'top';
+	annotation.text.split('\n').forEach((line, index) => {
+		ctx.fillText(line, annotation.at.x, annotation.at.y + index * size * TEXT_LINE_HEIGHT);
+	});
 }
 
 // Whether this annotation belongs on the multiplied highlight layer rather
@@ -385,7 +431,7 @@ function drawSelectionRings(ctx: CanvasRenderingContext2D, selected: Annotation[
 			ctx.fillRect(annotation.at.x - half, annotation.at.y - half, half * 2, half * 2);
 			return;
 		}
-		if (annotation.kind === 'image') {
+		if (annotation.kind === 'image' || annotation.kind === 'text') {
 			const box = boundingBox(annotation);
 			ctx.fillRect(box.minX - grow, box.minY - grow, box.maxX - box.minX + grow * 2, box.maxY - box.minY + grow * 2);
 			return;
@@ -407,7 +453,8 @@ function drawSelectionRings(ctx: CanvasRenderingContext2D, selected: Annotation[
 			}
 			return;
 		}
-		drawAnnotation(ctx, { ...annotation, color: colour, width: annotation.width + grow * 2 }, false);
+		// The ring follows the outline, not a filled shape's tint.
+		drawAnnotation(ctx, { ...annotation, ...(annotation.kind === 'shape' ? { filled: false } : {}), color: colour, width: annotation.width + grow * 2 }, false);
 	};
 
 	ctx.save();

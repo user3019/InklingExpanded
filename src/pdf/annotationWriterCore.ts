@@ -1,4 +1,6 @@
 import { PDFDocument } from 'pdf-lib';
+import { layoutStampOf } from './outline';
+import { loadSpeed, saveSpeed } from './pdfLibSpeed';
 import type { Annotation } from '../annotate/types';
 import { pruneOrphanedInklingAnnotations, readInklingAnnotations, stripInklingAnnotations, writeInklingAnnotations } from './annotationSync';
 import { profileFromPdfLib, riskyFeatures, type StructureProfile } from './compatibility';
@@ -43,6 +45,8 @@ export interface OpenedDocument {
 	// Each page's object in the file, by page index: who a page is, however
 	// its number changes — see pageIdsOf.
 	pageIds: string[];
+	// The document's page turns and bookmarks (see layoutStampOf).
+	layoutStamp: string;
 }
 
 // A page's identity across saves and devices. Its number is not one: a page
@@ -59,7 +63,7 @@ export function toArrayBuffer(bytes: Uint8Array): ArrayBuffer {
 }
 
 export async function openDocument(bytes: ArrayBuffer): Promise<OpenedDocument> {
-	const doc = await PDFDocument.load(bytes);
+	const doc = await PDFDocument.load(bytes, loadSpeed());
 
 	const savedAnnotations = new Map<number, Annotation[]>();
 	for (let index = 0; index < doc.getPageCount(); index++) {
@@ -91,9 +95,12 @@ export async function openDocument(bytes: ArrayBuffer): Promise<OpenedDocument> 
 	// transferred it away — pdf-lib doesn't detach the buffers it parses.
 	let displayBytes: ArrayBuffer;
 	if (savedAnnotations.size > 0) {
-		const displayDoc = await PDFDocument.load(bytes);
+		const displayDoc = await PDFDocument.load(bytes, loadSpeed());
 		stripInklingAnnotations(displayDoc);
-		displayBytes = toArrayBuffer(await displayDoc.save());
+		// Never written anywhere, only handed to pdf.js: packing its objects
+		// into compressed streams is time spent making small a copy that is
+		// thrown away, and is most of what a save costs.
+		displayBytes = toArrayBuffer(await displayDoc.save({ useObjectStreams: false, ...saveSpeed() }));
 	} else {
 		displayBytes = bytes.slice(0);
 	}
@@ -120,6 +127,7 @@ export async function openDocument(bytes: ArrayBuffer): Promise<OpenedDocument> 
 		session,
 		incremental: session.classification.supported,
 		pageIds: pageIdsOf(doc),
+		layoutStamp: layoutStampOf(doc),
 	};
 }
 

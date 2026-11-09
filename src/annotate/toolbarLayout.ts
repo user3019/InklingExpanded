@@ -22,6 +22,7 @@ export type ToolbarItemId =
 	| 'clear-page'
 	| 'add-page'
 	| 'background'
+	| 'pages'
 	| 'import'
 	| 'invert'
 	| 'outline'
@@ -51,6 +52,7 @@ export const TOOLBAR_ITEMS: readonly ToolbarItemSpec[] = [
 	{ id: 'highlighter', label: 'Highlighter', icon: 'highlighter', fallback: '🖊️' },
 	{ id: 'eraser', label: 'Eraser', icon: 'eraser', fallback: '⌫' },
 	{ id: 'note', label: 'Note', icon: 'message-square', fallback: '🗨' },
+	{ id: 'text', label: 'Text', icon: 'type', fallback: 'T' },
 	{ id: 'line', label: 'Line', icon: 'minus', fallback: '╱' },
 	{ id: 'rectangle', label: 'Rectangle', icon: 'square', fallback: '▭' },
 	{ id: 'oval', label: 'Oval', icon: 'circle', fallback: '◯' },
@@ -70,6 +72,7 @@ export const TOOLBAR_ITEMS: readonly ToolbarItemSpec[] = [
 	{ id: 'add-page', label: 'Add page', icon: 'file-plus', fallback: '＋' },
 	// Blank, lined or dot grid, for the page in view or every page.
 	{ id: 'background', label: 'Page background', icon: 'layout-grid', fallback: '▦' },
+	{ id: 'pages', label: 'Manage pages', icon: 'layout-list', fallback: '≣' },
 	{ id: 'import', label: 'Import a PDF or picture', icon: 'image-plus', fallback: '⤓' },
 	{ id: 'invert', label: 'Invert page', icon: 'contrast', fallback: '◐' },
 	{ id: 'outline', label: 'Outline and find', icon: 'panel-left', fallback: '☰' },

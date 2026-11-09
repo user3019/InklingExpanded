@@ -12,6 +12,9 @@ export interface OutlineEntry {
 	// when clicked is worse than an entry that isn't there.
 	pageNumber: number | null;
 	depth: number;
+	// Its place in the outline: its position among its siblings at each
+	// level. What a change to the bookmarks finds it by (see outline.ts).
+	path: number[];
 }
 
 // The shape pdf.js's getOutline() returns, narrowed to what is used here.
@@ -31,11 +34,13 @@ export async function flattenOutline(
 	items: readonly RawOutlineItem[] | null | undefined,
 	resolve: (dest: unknown) => Promise<number | null>,
 	depth = 0,
+	parent: readonly number[] = [],
 ): Promise<OutlineEntry[]> {
 	if (!items || depth > MAX_OUTLINE_DEPTH) return [];
 
 	const flattened: OutlineEntry[] = [];
-	for (const item of items) {
+	for (const [index, item] of items.entries()) {
+		const path = [...parent, index];
 		const title = typeof item.title === 'string' ? item.title.trim() : '';
 
 		let pageNumber: number | null = null;
@@ -51,8 +56,8 @@ export async function flattenOutline(
 		// An untitled entry is not worth a row, and one that goes nowhere
 		// would be a dead link. Their children may still be fine, so the walk
 		// continues past them rather than pruning the branch.
-		if (title && pageNumber !== null) flattened.push({ title, pageNumber, depth });
-		flattened.push(...(await flattenOutline(item.items, resolve, depth + 1)));
+		if (title && pageNumber !== null) flattened.push({ title, pageNumber, depth, path });
+		flattened.push(...(await flattenOutline(item.items, resolve, depth + 1, path)));
 	}
 	return flattened;
 }

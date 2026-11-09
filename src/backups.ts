@@ -21,13 +21,15 @@ import { writeBinarySafely } from './vaultWrite';
 const KEEP_PER_FILE = 5;
 const MAX_BACKUP_BYTES = 60 * 1024 * 1024;
 
-export type BackupReason = 'add-page' | 'insert-pages' | 'background' | 'delete-page' | 'restore';
+export type BackupReason = 'add-page' | 'insert-pages' | 'background' | 'delete-page' | 'move-page' | 'bookmarks' | 'restore';
 
 const REASON_LABELS: Record<BackupReason, string> = {
 	'add-page': 'before a page was added',
 	'insert-pages': 'before pages were inserted',
 	background: 'before the background changed',
 	'delete-page': 'before a page was deleted',
+	'move-page': 'before pages were moved',
+	bookmarks: 'before the bookmarks changed',
 	restore: 'before an earlier version was restored',
 };
 

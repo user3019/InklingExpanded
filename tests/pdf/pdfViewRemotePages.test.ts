@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { PDFDocument } from 'pdf-lib';
+import { degrees, PDFDocument } from 'pdf-lib';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Annotation, StrokeAnnotation } from '../../src/annotate/types';
 import { AnnotationWriterClient } from '../../src/pdf/annotationWriterClient';
@@ -54,6 +54,7 @@ async function open() {
 		writer: AnnotationWriterClient;
 		savedAnnotations: Map<number, Annotation[]>;
 		pageIds: string[];
+		layoutStamp: string;
 		viewports: Map<number, unknown>;
 		seededPages: Set<number>;
 		rememberDisk(file: unknown): Promise<void>;
@@ -96,6 +97,7 @@ async function open() {
 	internals.writer = writer;
 	internals.savedAnnotations = opened.savedAnnotations;
 	internals.pageIds = opened.pageIds;
+	internals.layoutStamp = opened.layoutStamp;
 	internals.pdf = {
 		numPages: 2,
 		getPage: async () => ({ view: [0, 0, WIDTH, HEIGHT], rotate: 0 }),
@@ -167,6 +169,39 @@ describe('a note changing on two devices at once', () => {
 		// And the view reloads, with page numbers that mean those pages.
 		expect(internals.onLoadFile).toHaveBeenCalled();
 		expect(internals.controller.isReadOnly()).toBe(false);
+	});
+
+	it('keeps ink not saved yet on its own page when the pages were moved there', async () => {
+		const { internals, onDiskPages, remote } = await open();
+		internals.controller.place(1, onScreen(stroke('ink-ours', 500)));
+		// There, the two pages trade places.
+		await remote((doc) => {
+			const second = doc.getPage(1);
+			doc.removePage(1);
+			doc.insertPage(0, second);
+		});
+		await vi.advanceTimersByTimeAsync(5000);
+
+		// Page 1 here is page 2 there now, and the ink went with it.
+		expect(await onDiskPages()).toEqual([['ink-b'], ['ink-a', 'ink-ours']]);
+		expect(internals.onLoadFile).toHaveBeenCalled();
+	});
+
+	it('shows a page turned there, keeping ink not saved yet on it', async () => {
+		const { internals, onDiskPages, remote } = await open();
+		internals.controller.place(1, onScreen(stroke('ink-ours', 500)));
+		await remote((doc) => doc.getPage(0).setRotation(degrees(90)));
+		await vi.advanceTimersByTimeAsync(5000);
+
+		expect(await onDiskPages()).toEqual([['ink-a', 'ink-ours'], ['ink-b']]);
+		expect(internals.onLoadFile).toHaveBeenCalled();
+	});
+
+	it('does not reload for ink saved there, with the turns unchanged', async () => {
+		const { internals, remote } = await open();
+		await remote((doc) => writeInklingAnnotations(doc, 1, [stroke('ink-b', 600), stroke('ink-new', 400)]));
+		await vi.advanceTimersByTimeAsync(5000);
+		expect(internals.onLoadFile).not.toHaveBeenCalled();
 	});
 
 	it('keeps every page’s ink where it was when a page is deleted there', async () => {

@@ -10,7 +10,8 @@ import { compactInkBlocks } from './markdown/compactInkBlocks';
 import { registerInkBlock } from './markdown/inkBlock';
 import { inkFilePathFor } from './markdown/inkFilePath';
 import { registerNoteCreation } from './noteCreation';
-import { attachThumbnailMenu } from './pageMenu';
+import { attachThumbnailDrag, attachThumbnailMenu, openManagePages } from './pageMenu';
+import { ReaderPageWatch } from './readerPageWatch';
 import { readCorePdfPage } from './coreViews';
 import { startStylusCheck } from './stylusCheck';
 import { BackupModal, listBackups } from './backups';
@@ -48,6 +49,7 @@ export default class InklingPlugin extends Plugin {
 	// outlives those rebuilds, and it means the pen carries between blocks
 	// and PDFs the way a real one does. See src/annotate/toolState.ts.
 	private readonly toolState = new ToolState();
+	private readerPageWatch: ReaderPageWatch | null = null;
 	private reportedLocalSaveFailure = false;
 	// Read once on load and handed around by reference, never by
 	// snapshot, so changing a setting takes effect without reopening a
@@ -95,8 +97,27 @@ export default class InklingPlugin extends Plugin {
 		// into VIEW_TYPE_PDF, and InklingExpanded's own view offers a matching action
 		// back to the core view (see PdfAnnotateView.exitEditMode).
 		this.registerEvent(this.app.workspace.on('active-leaf-change', (leaf) => this.decorateIfCorePdfLeaf(leaf)));
+
+		const readerPageWatch = new ReaderPageWatch(this.app);
+		this.readerPageWatch = readerPageWatch;
+		this.registerEvent(
+			this.app.vault.on('modify', (file) => {
+				if (file instanceof TFile) readerPageWatch.fileChanged(file);
+			}),
+		);
+		// Whichever PDF a reader has come to show, so that the first change to
+		// it from elsewhere has something to be compared with.
+		this.registerEvent(
+			this.app.workspace.on('file-open', (file) => {
+				if (file?.extension === 'pdf') readerPageWatch.readerOpened(file);
+			}),
+		);
 		this.app.workspace.onLayoutReady(() => {
-			for (const leaf of this.app.workspace.getLeavesOfType(CORE_PDF_VIEW_TYPE)) this.decorateIfCorePdfLeaf(leaf);
+			for (const leaf of this.app.workspace.getLeavesOfType(CORE_PDF_VIEW_TYPE)) {
+				this.decorateIfCorePdfLeaf(leaf);
+				// A reader restored with the workspace fires no file-open.
+				if (leaf.view instanceof FileView && leaf.view.file) readerPageWatch.readerOpened(leaf.view.file);
+			}
 		});
 
 		this.addCommand({
@@ -143,6 +164,17 @@ export default class InklingPlugin extends Plugin {
 						else new BackupModal(this.app, file, backups).open();
 					});
 				}
+				return true;
+			},
+		});
+
+		this.addCommand({
+			id: 'manage-pdf-pages',
+			name: 'Manage pages of this PDF',
+			checkCallback: (checking) => {
+				const file = this.activePdfFile();
+				if (!file) return false;
+				if (!checking) openManagePages(this.app, file);
 				return true;
 			},
 		});
@@ -362,6 +394,7 @@ export default class InklingPlugin extends Plugin {
 	}
 
 	onunload(): void {
+		this.readerPageWatch?.stop();
 		// The "annotate" buttons live on Obsidian's *own* PDF views, not on
 		// anything this plugin owns and Obsidian would tear down for it — so
 		// without this they'd outlive the plugin, still sitting in the
@@ -391,6 +424,7 @@ export default class InklingPlugin extends Plugin {
 		// page, or delete it. See pageMenu.ts.
 		if (view instanceof FileView) {
 			attachThumbnailMenu(this.app, view, (el, handler) => this.registerDomEvent(el, 'contextmenu', handler, { capture: true }));
+			attachThumbnailDrag(this.app, view, (type, handler) => this.registerDomEvent(view.containerEl, type, handler, { capture: true }));
 		}
 	}
 

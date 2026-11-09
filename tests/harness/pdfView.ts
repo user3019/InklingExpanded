@@ -68,7 +68,7 @@ export function openPdfView(options: { toolState?: ToolState; writeDone?: () => 
 			for (const listener of vaultListeners.get(name) ?? []) listener(file);
 		},
 	};
-	const leaf = { app: { vault, workspace: { on: () => ({}), getLeavesOfType: () => [] } } };
+	const leaf = { app: { vault, metadataCache: { resolvedLinks: {} }, workspace: { on: () => ({}), getLeavesOfType: () => [] } } };
 	const view = new PdfAnnotateView(leaf as never, options.toolState ?? new ToolState());
 	const file = new TFile('Notes/Handwritten.pdf');
 

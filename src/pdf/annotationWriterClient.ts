@@ -47,6 +47,9 @@ export interface OpenResult {
 	// Each page's identity in the file, by index — see pageIdsOf in
 	// annotationWriterCore.ts.
 	pageIds: string[];
+	// The page turns and bookmarks, for noticing another device's change to
+	// either (see layoutStampOf in outline.ts).
+	layoutStamp: string;
 }
 
 // What a save produced. The two go to different Vault calls, so the view is
@@ -117,6 +120,7 @@ export class AnnotationWriterClient {
 				risky: opened.risky,
 				incremental: opened.incremental,
 				pageIds: opened.pageIds,
+				layoutStamp: opened.layoutStamp,
 			};
 		}
 
@@ -295,6 +299,7 @@ export class AnnotationWriterClient {
 				risky: message.risky,
 				incremental: message.incremental,
 				pageIds: message.pageIds,
+				layoutStamp: message.layoutStamp,
 			} as never);
 		} else if (message.type === 'written') {
 			entry.resolve(message.outcome as never);

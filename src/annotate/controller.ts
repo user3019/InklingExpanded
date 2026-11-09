@@ -40,7 +40,7 @@ import { attachSelectionCatcher } from './selectionCatcher';
 import { AnnotationStore } from './store';
 import { HistoryStack } from './history';
 import type { ToolbarLayout } from './toolbarLayout';
-import { ToolState } from './toolState';
+import { ToolState, type ShapeOptions } from './toolState';
 import {
 	Annotation,
 	DrawToolType,
@@ -54,6 +54,8 @@ import {
 	StrokeAnnotation,
 	ToolType,
 	isLockedPicture,
+	TEXT_LINE_HEIGHT,
+	type TextAnnotation,
 } from './types';
 
 // The eraser reuses the shared width control as its size/radius (per the
@@ -270,9 +272,14 @@ export interface AnnotationControllerOptions {
 	// Opens the host's menu of page backgrounds, from the toolbar's
 	// background button. Offered, like Add page, only on a note.
 	onChangeBackground?: (anchor: HTMLElement) => void;
+	onManagePages?: () => void;
 	// What the side button of a stylus does while held (see the setting).
 	// Omitted, it erases.
 	getPenButtonAction?: () => 'eraser' | 'highlighter' | 'select' | 'none';
+	// What this surface can keep, where that is not everything: an ink
+	// block's format holds no pictures or sticky notes, and pasting one in
+	// would leave a block it could not read back.
+	acceptedKinds?: readonly Annotation['kind'][];
 	// A page's canvas pixels per unit of the page itself — PDF points, in the
 	// PDF view. Omitted, 1: an ink block's canvas is its own unit. Copying
 	// and pasting between pages shown at different sizes goes through it.
@@ -314,6 +321,20 @@ export class AnnotationController {
 	// A picture being cropped: where it is on its page, and the part of it
 	// that is to stay. See startCrop.
 	private cropping: { pageNumber: number; id: string; picture: Rect; rect: Rect } | null = null;
+	// Pages whose ink changed during a drag and await their frame (see
+	// onPageChanged).
+	// The text being typed, while it is. See openTextEditor.
+	private textEditor: {
+		pageNumber: number;
+		element: HTMLTextAreaElement;
+		before: Annotation[];
+		existing: TextAnnotation | null;
+		at: Point;
+		size: number;
+		color: string;
+	} | null = null;
+	private readonly basePending = new Set<number>();
+	private baseFrame: number | null = null;
 	// A paste on offer, where a press was held (see offerPasteAt).
 	private pasteOffer: { pageNumber: number; at: Point } | null = null;
 	// Where a pen or mouse last was over a page, for a paste from the
@@ -361,7 +382,7 @@ export class AnnotationController {
 		this.history = options.history ?? new HistoryStack();
 		this.store = new AnnotationStore(
 			this.history,
-			(pageNumber) => this.redrawBase(pageNumber),
+			(pageNumber) => this.onPageChanged(pageNumber),
 			(pageNumber) => this.options.onAnnotationsChanged?.(pageNumber),
 		);
 		// Last, because the callback repaints through the store above.
@@ -532,6 +553,7 @@ export class AnnotationController {
 		if (!mount) return;
 		if (this.catcher?.pageNumber === pageNumber) this.hideCatcher();
 		if (this.pasteOffer?.pageNumber === pageNumber) this.pasteOffer = null;
+		if (this.textEditor?.pageNumber === pageNumber) this.finishTextEditor();
 		mount.detach();
 		mount.base.canvas.remove();
 		mount.overlayCanvas.remove();
@@ -540,6 +562,8 @@ export class AnnotationController {
 	}
 
 	unmountAll(): void {
+		this.finishTextEditor();
+		this.flushBaseRedraws();
 		this.cancelScheduledOverlayRedraw();
 		this.cancelLongPress();
 		for (const pageNumber of [...this.pages.keys()]) this.unmountPage(pageNumber);
@@ -583,6 +607,7 @@ export class AnnotationController {
 	}
 
 	setTool(tool: ToolType): void {
+		this.finishTextEditor();
 		// Another tool picked up ends a crop, keeping it — as done would.
 		if (this.cropping && tool !== this.getTool()) void this.applyCrop();
 		this.toolState.setTool(tool);
@@ -656,6 +681,7 @@ export class AnnotationController {
 		if (readOnly) {
 			this.hideCatcher();
 			this.pasteOffer = null;
+			this.finishTextEditor();
 		}
 		this.readOnly = readOnly;
 		if (readOnly) {
@@ -900,7 +926,7 @@ export class AnnotationController {
 			return;
 		}
 		this.eraserCursor = { pageNumber, point };
-		this.redrawOverlay(pageNumber);
+		this.scheduleOverlayRedraw(pageNumber);
 	}
 
 	private handleStart(pageNumber: number, point: Point, event?: PointerEvent): void {
@@ -917,6 +943,11 @@ export class AnnotationController {
 			void this.applyCrop();
 		}
 		this.lastPointer = { pageNumber, point };
+		// Typing is ended by a press anywhere else, and that press is only that.
+		if (this.textEditor) {
+			this.finishTextEditor();
+			return;
+		}
 		// A paste on offer is taken by a press on its button, and let go of by
 		// a press anywhere else — which then does what it would have.
 		if (this.pasteOffer) {
@@ -956,11 +987,14 @@ export class AnnotationController {
 				// the moment the editor opens.
 				void this.editNoteAt(pageNumber, point, null, '');
 				break;
+			case 'text':
+				this.startTextAt(pageNumber, point);
+				break;
 			case 'select':
 				this.handleSelectStart(pageNumber, point);
 				break;
 		}
-		if (tool !== 'select' && tool !== 'note') this.watchForLongPress(pageNumber, point);
+		if (tool !== 'select' && tool !== 'note' && tool !== 'text') this.watchForLongPress(pageNumber, point);
 		this.redrawOverlay(pageNumber);
 	}
 
@@ -1021,6 +1055,14 @@ export class AnnotationController {
 	// nothing selected, it picks out the drawing under it, as a pen's tap does.
 	touchTap(pageNumber: number, point: Point): void {
 		if (this.readOnly) return;
+		if (this.textEditor) {
+			this.finishTextEditor();
+			return;
+		}
+		if (this.getTool() === 'text') {
+			this.startTextAt(pageNumber, point);
+			return;
+		}
 		if (this.pasteOffer) {
 			const offer = this.pasteOffer;
 			if (offer.pageNumber === pageNumber && pasteButtonAt(offer.at, this.chromeScale(pageNumber), point)) {
@@ -1393,6 +1435,7 @@ export class AnnotationController {
 
 	private endCatcherErase(pageNumber: number): void {
 		this.catcherLast = null;
+		this.flushBaseRedraws();
 		const drag = this.drag;
 		if (!drag || drag.pageNumber !== pageNumber || drag.mode.kind !== 'erase') return;
 		this.store.commitGesture(pageNumber, drag.mode.before);
@@ -1416,6 +1459,7 @@ export class AnnotationController {
 	// that began to draw and turned out to be one of two starting a pinch.
 	abandonGesture(): void {
 		this.cancelLongPress();
+		this.flushBaseRedraws();
 		const drag = this.drag;
 		if (!drag) return;
 		if (drag.mode.kind === 'erase' || drag.mode.kind === 'move' || drag.mode.kind === 'resize') {
@@ -1508,6 +1552,99 @@ export class AnnotationController {
 		this.notify();
 	}
 
+	// ---- Typing on the page ----
+	//
+	// A text box right on the page, in the size and colour the text will
+	// have. A press anywhere else keeps what was typed; Escape leaves things
+	// as they were. Its size is in points, like text anywhere else, so it
+	// looks the same however the page is zoomed when it is typed.
+
+	// On text already there: that text, to change. Anywhere else: new text.
+	private startTextAt(pageNumber: number, point: Point): void {
+		if (this.readOnly) return;
+		const existing = [...this.store.getPage(pageNumber)].reverse().find((a): a is TextAnnotation => a.kind === 'text' && hitTestAnnotation(a, point));
+		this.openTextEditor(pageNumber, point, existing ?? null);
+	}
+
+	private openTextEditor(pageNumber: number, point: Point, existing: TextAnnotation | null): void {
+		this.finishTextEditor();
+		const mount = this.pages.get(pageNumber);
+		if (!mount) return;
+		const before = this.store.getPage(pageNumber);
+		const size = existing?.width ?? this.getWidth() * this.unitScale(pageNumber);
+		const color = existing?.color ?? this.getColor();
+		// Lifted by half a line, so a tap lands in the middle of the first
+		// line rather than above it.
+		const at = existing?.at ?? { x: Math.max(point.x, 0), y: Math.max(point.y - (size * TEXT_LINE_HEIGHT) / 2, 0) };
+		// Taken off the page while it is typed over: the box shows it.
+		if (existing) this.store.setPageLive(pageNumber, before.filter((a) => a.id !== existing.id));
+
+		const shownWidth = mount.overlayCanvas.offsetWidth;
+		const cssPerCanvas = shownWidth > 0 ? shownWidth / mount.width : 1;
+		const element = mount.content.createEl('textarea', { cls: 'inkling-text-editor' });
+		element.value = existing?.text ?? '';
+		element.wrap = 'off';
+		element.rows = 1;
+		element.setAttribute('aria-label', 'Text');
+		element.setCssProps({
+			'--inkling-text-left': `${(at.x / mount.width) * 100}%`,
+			'--inkling-text-top': `${(at.y / mount.height) * 100}%`,
+			'--inkling-text-size': `${size * cssPerCanvas}px`,
+			'--inkling-text-color': color,
+		});
+		const fit = () => {
+			element.setCssProps({ '--inkling-text-width': '1px', '--inkling-text-height': '1px' });
+			element.setCssProps({
+				'--inkling-text-width': `${element.scrollWidth + 12}px`,
+				'--inkling-text-height': `${element.scrollHeight + 2}px`,
+			});
+		};
+		element.addEventListener('input', fit);
+		element.addEventListener('blur', () => this.finishTextEditor());
+		element.addEventListener('keydown', (event: KeyboardEvent) => {
+			// The view's keys are tool shortcuts, and these are letters.
+			event.stopPropagation();
+			if (event.key === 'Escape') {
+				event.preventDefault();
+				this.finishTextEditor(true);
+			} else if (event.key === 'Enter' && (event.ctrlKey || event.metaKey)) {
+				event.preventDefault();
+				this.finishTextEditor();
+			}
+		});
+		this.textEditor = { pageNumber, element, before, existing, at, size, color };
+		fit();
+		element.focus();
+		element.setSelectionRange(element.value.length, element.value.length);
+		this.notify();
+	}
+
+	private finishTextEditor(cancel = false): void {
+		const editor = this.textEditor;
+		if (!editor) return;
+		// First, because removing a focused element fires its blur.
+		this.textEditor = null;
+		const { pageNumber, element, before, existing, at, size, color } = editor;
+		const text = element.value.replace(/\s+$/, '');
+		element.remove();
+		if (cancel || this.readOnly) {
+			this.store.setPageLive(pageNumber, before);
+		} else if (!text) {
+			// Emptied: gone. One step of undo brings it back if it was there.
+			this.store.setPageLive(pageNumber, before.filter((a) => a.id !== existing?.id));
+			this.store.commitGesture(pageNumber, before);
+		} else {
+			const typed: TextAnnotation = existing ? { ...existing, text } : { id: createId(), kind: 'text', color, width: size, at, text };
+			this.store.setPageLive(
+				pageNumber,
+				existing ? before.map((a) => (a.id === existing.id ? typed : a)) : [...before, typed],
+			);
+			this.store.commitGesture(pageNumber, before);
+		}
+		this.redrawOverlay(pageNumber);
+		this.notify();
+	}
+
 	// ---- Copy and paste ----
 	//
 	// A selection's bar has a copy button; Ctrl/Cmd+C does the same, and X
@@ -1574,7 +1711,13 @@ export class AnnotationController {
 		this.withdrawPasteOffer();
 		const factor = this.unitScale(pageNumber) / copied.unit;
 		const origin = { x: 0, y: 0 };
-		const sized = copied.annotations.map((a) => (factor === 1 ? a : scaleAnnotationAbout(a, origin, factor)));
+		const accepted = this.options.acceptedKinds;
+		const fitting = accepted ? copied.annotations.filter((a) => accepted.includes(a.kind)) : copied.annotations;
+		if (fitting.length === 0) {
+			new Notice('InklingExpanded: pictures and sticky notes cannot be pasted into an ink block.');
+			return false;
+		}
+		const sized = fitting.map((a) => (factor === 1 ? a : scaleAnnotationAbout(a, origin, factor)));
 		const box = unionBoundingBox(sized.map(boundingBox));
 		const width = box.maxX - box.minX;
 		const height = box.maxY - box.minY;
@@ -1769,6 +1912,7 @@ export class AnnotationController {
 
 	private handleEnd(pageNumber: number, point: Point, event?: PointerEvent): void {
 		this.cancelLongPress();
+		this.flushBaseRedraws();
 		if (this.readOnly) return;
 		if (!this.drag || this.drag.pageNumber !== pageNumber) return;
 		const mode = this.drag.mode;
@@ -1835,6 +1979,7 @@ export class AnnotationController {
 	// than to leave where the cancel caught it.
 	private handleCancel(pageNumber: number, event?: PointerEvent): void {
 		this.cancelLongPress();
+		this.flushBaseRedraws();
 		// Included deliberately: this is the path a palm rejection or a lost
 		// pointer takes, and for a draw gesture it *commits* what was drawn
 		// rather than discarding it. Leaving it ungated would let a stroke
@@ -2055,6 +2200,14 @@ export class AnnotationController {
 		if (!this.readOnly) this.options.onChangeBackground?.(anchor);
 	}
 
+	canOpenManagePages(): boolean {
+		return this.getCanManagePages() && !!this.options.onManagePages;
+	}
+
+	openManagePages(): void {
+		if (!this.readOnly) this.options.onManagePages?.();
+	}
+
 	setBrush(brush: PenBrush): void {
 		this.toolState.setBrush(brush);
 	}
@@ -2068,11 +2221,34 @@ export class AnnotationController {
 			width: this.inkWidth(pageNumber),
 			start: mode.start,
 			end: mode.end,
+			...this.shapeStyle(mode.tool),
 		};
 	}
 
+	// What the shape picker has set, as far as it applies to this shape.
+	private shapeStyle(tool: ShapeToolType): Pick<ShapeAnnotation, 'dash' | 'filled' | 'bothEnds'> {
+		const { dash, filled, bothEnds } = this.toolState.getShapeOptions();
+		return {
+			...(dash !== 'solid' ? { dash } : {}),
+			...(filled && (tool === 'rectangle' || tool === 'oval') ? { filled } : {}),
+			...(bothEnds && tool === 'arrow' ? { bothEnds } : {}),
+		};
+	}
+
+	getShapeOptions(): ShapeOptions {
+		return this.toolState.getShapeOptions();
+	}
+
+	setShapeOptions(change: Partial<ShapeOptions>): void {
+		this.toolState.setShapeOptions(change);
+	}
+
 	private applyErase(pageNumber: number, point: Point): void {
-		this.store.setPageLive(pageNumber, eraseAt(this.store.getPage(pageNumber), point, this.eraserRadius(pageNumber)));
+		const before = this.store.getPage(pageNumber);
+		const after = eraseAt(before, point, this.eraserRadius(pageNumber));
+		// Most samples of an eraser touch nothing: no change, no repaint.
+		if (after.length === before.length && after.every((annotation, index) => annotation === before[index])) return;
+		this.store.setPageLive(pageNumber, after);
 	}
 
 	private eraserRadius(pageNumber: number): number {
@@ -2112,6 +2288,35 @@ export class AnnotationController {
 
 	private redrawAllOverlay(): void {
 		for (const pageNumber of this.pages.keys()) this.redrawOverlay(pageNumber);
+	}
+
+	// A page's ink changed. Repainted now, unless that is one step of a drag
+	// — erasing, moving, sizing — which changes it on every sample a pen
+	// sends, faster than the screen can show. Those are painted once a frame:
+	// repainting a page thick with writing on every sample was what made an
+	// eraser or a moved selection lag behind the pen.
+	private onPageChanged(pageNumber: number): void {
+		const kind = this.drag?.pageNumber === pageNumber ? this.drag.mode.kind : null;
+		if (kind !== 'erase' && kind !== 'move' && kind !== 'resize') {
+			this.basePending.delete(pageNumber);
+			this.redrawBase(pageNumber);
+			return;
+		}
+		this.basePending.add(pageNumber);
+		this.baseFrame ??= window.requestAnimationFrame(() => {
+			this.baseFrame = null;
+			this.flushBaseRedraws();
+		});
+	}
+
+	// Whatever a drag left waiting for its frame, now: the gesture is over,
+	// or the page is about to be measured or taken away.
+	private flushBaseRedraws(): void {
+		if (this.baseFrame !== null) window.cancelAnimationFrame(this.baseFrame);
+		this.baseFrame = null;
+		const pages = [...this.basePending];
+		this.basePending.clear();
+		for (const pageNumber of pages) this.redrawBase(pageNumber);
 	}
 
 	private redrawBase(pageNumber: number): void {
@@ -2294,6 +2499,7 @@ export class AnnotationController {
 				width: this.inkWidth(pageNumber),
 				start: mode.start,
 				end: mode.end,
+				...this.shapeStyle(mode.tool),
 			};
 		}
 		return null;
